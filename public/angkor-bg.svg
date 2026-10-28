@@ -1,0 +1,200 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 1920" width="1080" height="1920">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="skyGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#041f15"/>
+      <stop offset="35%" stop-color="#0b3d27"/>
+      <stop offset="55%" stop-color="#14583b"/>
+      <stop offset="70%" stop-color="#d48a28"/>
+      <stop offset="82%" stop-color="#f2c144"/>
+      <stop offset="100%" stop-color="#113622"/>
+    </linearGradient>
+
+    <!-- Sun Flare Gradient -->
+    <radialGradient id="sunGlow" cx="20%" cy="12%" r="40%">
+      <stop offset="0%" stop-color="#fffbda" stop-opacity="0.95"/>
+      <stop offset="25%" stop-color="#ffd56b" stop-opacity="0.6"/>
+      <stop offset="60%" stop-color="#288358" stop-opacity="0.2"/>
+      <stop offset="100%" stop-color="#041f15" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Horizon Sun -->
+    <radialGradient id="horizonSun" cx="22%" cy="74%" r="18%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="1"/>
+      <stop offset="30%" stop-color="#ffe885" stop-opacity="0.85"/>
+      <stop offset="70%" stop-color="#f39c12" stop-opacity="0.4"/>
+      <stop offset="100%" stop-color="#f39c12" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Water Reflection Gradient -->
+    <linearGradient id="waterGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#c88322" stop-opacity="0.85"/>
+      <stop offset="40%" stop-color="#1b5a3c" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#052015" stop-opacity="1"/>
+    </linearGradient>
+
+    <!-- Gold Banner Accent -->
+    <linearGradient id="goldGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#b8860b"/>
+      <stop offset="30%" stop-color="#f7e07a"/>
+      <stop offset="50%" stop-color="#fff8d6"/>
+      <stop offset="70%" stop-color="#f7e07a"/>
+      <stop offset="100%" stop-color="#b8860b"/>
+    </linearGradient>
+
+    <!-- Leaf Pattern Filters -->
+    <filter id="blurLight">
+      <feGaussianBlur stdDeviation="8"/>
+    </filter>
+  </defs>
+
+  <!-- Base Sky Background -->
+  <rect width="1080" height="1920" fill="url(#skyGrad)"/>
+
+  <!-- Sun Glow in Top Left -->
+  <rect width="1080" height="1920" fill="url(#sunGlow)"/>
+
+  <!-- Sunbeams Top Left -->
+  <g opacity="0.35">
+    <polygon points="120,80 300,1000 0,1000" fill="#fff" opacity="0.25" filter="url(#blurLight)"/>
+    <polygon points="150,80 600,1200 200,1200" fill="#ffeb99" opacity="0.2" filter="url(#blurLight)"/>
+    <polygon points="180,80 900,1100 500,1100" fill="#fff" opacity="0.15" filter="url(#blurLight)"/>
+  </g>
+
+  <!-- Top Left Overhanging Leaves -->
+  <g fill="#184e31" opacity="0.95">
+    <!-- Branch 1 -->
+    <path d="M-20,-20 Q180,80 280,220 Q160,180 100,140 Z"/>
+    <path d="M40,20 Q120,120 80,180 Q20,120 40,20 Z" fill="#2d8253"/>
+    <path d="M110,60 Q210,170 160,230 Q80,160 110,60 Z" fill="#42a86e"/>
+    <path d="M190,120 Q310,240 260,300 Q160,220 190,120 Z" fill="#1b5c39"/>
+    <!-- Leaf Clusters -->
+    <ellipse cx="80" cy="100" rx="45" ry="20" transform="rotate(35 80 100)" fill="#54c483"/>
+    <ellipse cx="160" cy="150" rx="55" ry="24" transform="rotate(25 160 150)" fill="#2a7d4f"/>
+    <ellipse cx="240" cy="210" rx="60" ry="26" transform="rotate(40 240 210)" fill="#3bb06f"/>
+    <ellipse cx="320" cy="270" rx="50" ry="22" transform="rotate(15 320 270)" fill="#1c5738"/>
+  </g>
+
+  <!-- Top Right Overhanging Leaves -->
+  <g fill="#123d26" opacity="0.9">
+    <path d="M1100,-20 Q900,100 780,240 Q920,180 1000,120 Z"/>
+    <ellipse cx="980" cy="90" rx="50" ry="22" transform="rotate(-30 980 90)" fill="#2d8253"/>
+    <ellipse cx="900" cy="160" rx="55" ry="25" transform="rotate(-20 900 160)" fill="#42a86e"/>
+    <ellipse cx="820" cy="230" rx="60" ry="26" transform="rotate(-35 820 230)" fill="#1b5c39"/>
+  </g>
+
+  <!-- Soft Bokeh Orbs -->
+  <circle cx="280" cy="320" r="45" fill="#ffe28a" opacity="0.25" filter="url(#blurLight)"/>
+  <circle cx="180" cy="450" r="70" fill="#52cc8a" opacity="0.15" filter="url(#blurLight)"/>
+  <circle cx="850" cy="580" r="90" fill="#ffd97d" opacity="0.2" filter="url(#blurLight)"/>
+  <circle cx="780" cy="1100" r="60" fill="#ffd97d" opacity="0.2" filter="url(#blurLight)"/>
+
+  <!-- Horizon Sun Glow -->
+  <circle cx="230" cy="1420" r="220" fill="url(#horizonSun)"/>
+
+  <!-- Sugar Palm Trees Silhouette (Background Line) -->
+  <g fill="#0b2c1d" opacity="0.9">
+    <!-- Left Palm Trees -->
+    <rect x="30" y="1300" width="8" height="180" rx="4"/>
+    <circle cx="34" cy="1300" r="35" fill="#082217"/>
+    <rect x="110" y="1340" width="10" height="140" rx="5"/>
+    <circle cx="115" cy="1340" r="40" fill="#082217"/>
+    <rect x="180" y="1370" width="7" height="110" rx="3"/>
+    <circle cx="183.5" cy="1370" r="28" fill="#082217"/>
+    <rect x="280" y="1380" width="9" height="100" rx="4"/>
+    <circle cx="284.5" cy="1380" r="32" fill="#082217"/>
+
+    <!-- Right Palm Trees -->
+    <rect x="800" y="1360" width="8" height="120" rx="4"/>
+    <circle cx="804" cy="1360" r="30" fill="#082217"/>
+    <rect x="880" y="1290" width="11" height="190" rx="5"/>
+    <circle cx="885.5" cy="1290" r="45" fill="#082217"/>
+    <rect x="970" y="1320" width="10" height="160" rx="5"/>
+    <circle cx="975" cy="1320" r="40" fill="#082217"/>
+    <rect x="1030" y="1350" width="8" height="130" rx="4"/>
+    <circle cx="1034" cy="1350" r="32" fill="#082217"/>
+  </g>
+
+  <!-- ANGKOR WAT MAIN TEMPLE SILHOUETTE (Center Horizon at y=1340) -->
+  <g fill="#09291b" stroke="#051a11" stroke-width="2">
+    <!-- Base Platform -->
+    <rect x="220" y="1420" width="640" height="60" rx="4"/>
+    <rect x="260" y="1390" width="560" height="30" rx="3"/>
+    <rect x="310" y="1370" width="460" height="20" rx="2"/>
+
+    <!-- Central Main Tower -->
+    <path d="M510,1230 L570,1230 L575,1270 L585,1270 L590,1310 L600,1310 L605,1370 L475,1370 L480,1310 L490,1310 L495,1270 L505,1270 Z"/>
+    <path d="M540,1200 L545,1230 L535,1230 Z" fill="#051a11"/> <!-- Spire tip -->
+
+    <!-- Inner Left Tower -->
+    <path d="M430,1280 L470,1280 L475,1320 L485,1320 L490,1370 L410,1370 L415,1320 L425,1320 Z"/>
+    <path d="M450,1250 L454,1280 L446,1280 Z" fill="#051a11"/>
+
+    <!-- Inner Right Tower -->
+    <path d="M610,1280 L650,1280 L655,1320 L665,1320 L670,1370 L590,1370 L595,1320 L605,1320 Z"/>
+    <path d="M630,1250 L634,1280 L626,1280 Z" fill="#051a11"/>
+
+    <!-- Outer Left Tower -->
+    <path d="M350,1310 L385,1310 L390,1340 L395,1340 L400,1390 L335,1390 L340,1340 L345,1340 Z"/>
+    <path d="M367.5,1285 L371,1310 L364,1310 Z" fill="#051a11"/>
+
+    <!-- Outer Right Tower -->
+    <path d="M695,1310 L730,1310 L735,1340 L740,1340 L745,1390 L680,1390 L685,1340 L690,1340 Z"/>
+    <path d="M712.5,1285 L716,1310 L709,1310 Z" fill="#051a11"/>
+
+    <!-- Gallery Roof Lines -->
+    <rect x="240" y="1425" width="600" height="8" fill="#d48a28" opacity="0.3"/>
+    <rect x="280" y="1395" width="520" height="6" fill="#f2c144" opacity="0.4"/>
+  </g>
+
+  <!-- Water Surface & Mirror Reflection -->
+  <rect x="0" y="1480" width="1080" height="440" fill="url(#waterGrad)"/>
+
+  <!-- Water Reflection Silhouette (Flipped & Soft Blurred) -->
+  <g opacity="0.35" transform="scale(1, -1) translate(0, -2960)" filter="url(#blurLight)">
+    <!-- Reflected Angkor Temple -->
+    <rect x="220" y="1420" width="640" height="60" fill="#072015"/>
+    <path d="M510,1230 L570,1230 L590,1310 L605,1370 L475,1370 L490,1310 Z" fill="#072015"/>
+    <path d="M430,1280 L470,1280 L490,1370 L410,1370 Z" fill="#072015"/>
+    <path d="M610,1280 L650,1280 L670,1370 L590,1370 Z" fill="#072015"/>
+  </g>
+
+  <!-- Water Ripples -->
+  <g stroke="#fceabb" stroke-width="1.5" opacity="0.25">
+    <line x1="100" y1="1520" x2="350" y2="1520"/>
+    <line x1="400" y1="1530" x2="750" y2="1530"/>
+    <line x1="200" y1="1560" x2="550" y2="1560"/>
+    <line x1="600" y1="1580" x2="900" y2="1580"/>
+    <line x1="150" y1="1620" x2="480" y2="1620"/>
+    <line x1="520" y1="1650" x2="820" y2="1650"/>
+  </g>
+
+  <!-- BOTTOM DEEP EMERALD CURVED BANNER FRAME -->
+  <path d="M -20,1940 L -20,1580 Q 540,1850 1100,1580 L 1100,1940 Z" fill="#041a10"/>
+
+  <!-- Double Gold Accent Arc Borders -->
+  <path d="M -20,1580 Q 540,1850 1100,1580" fill="none" stroke="url(#goldGrad)" stroke-width="10"/>
+  <path d="M -20,1600 Q 540,1870 1100,1600" fill="none" stroke="url(#goldGrad)" stroke-width="3" opacity="0.7"/>
+
+  <!-- TRADITIONAL KHMER KBACH ORNAMENTS (Bottom Left & Bottom Right) -->
+  <!-- Left Kbach Ornament -->
+  <g transform="translate(120, 1780) scale(1.4)">
+    <!-- Central Flame Petal -->
+    <path d="M 0,-50 C 15,-30 25,-10 0,20 C -25,-10 -15,-30 0,-50 Z" fill="url(#goldGrad)"/>
+    <path d="M 0,-40 C 10,-25 18,-8 0,12 C -18,-8 -10,-25 0,-40 Z" fill="#041a10"/>
+    <!-- Outer Curved Wings -->
+    <path d="M 0,0 C 35,-20 45,10 20,30 C 5,20 10,-5 0,0 Z" fill="url(#goldGrad)"/>
+    <path d="M 0,0 C -35,-20 -45,10 -20,30 C -5,20 -10,-5 0,0 Z" fill="url(#goldGrad)"/>
+    <!-- Base Scroll -->
+    <circle cx="0" cy="20" r="8" fill="url(#goldGrad)"/>
+  </g>
+
+  <!-- Right Kbach Ornament -->
+  <g transform="translate(960, 1780) scale(1.4)">
+    <path d="M 0,-50 C 15,-30 25,-10 0,20 C -25,-10 -15,-30 0,-50 Z" fill="url(#goldGrad)"/>
+    <path d="M 0,-40 C 10,-25 18,-8 0,12 C -18,-8 -10,-25 0,-40 Z" fill="#041a10"/>
+    <path d="M 0,0 C 35,-20 45,10 20,30 C 5,20 10,-5 0,0 Z" fill="url(#goldGrad)"/>
+    <path d="M 0,0 C -35,-20 -45,10 -20,30 C -5,20 -10,-5 0,0 Z" fill="url(#goldGrad)"/>
+    <circle cx="0" cy="20" r="8" fill="url(#goldGrad)"/>
+  </g>
+</svg>
