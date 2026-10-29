@@ -487,7 +487,7 @@ export default function App() {
     return (sessionStorage.getItem('staffRole') as 'admin' | 'manager') || 'admin';
   });
   const [selectedLoginRoom, setSelectedLoginRoom] = useState<string>('');
-  const [loginUsername, setLoginUsername] = useState<string>('');
+  const [loginUsername, setLoginUsername] = useState<string>('admin');
   const [loginPassword, setLoginPassword] = useState<string>('');
   const [tenantLoginRoom, setTenantLoginRoom] = useState<string>('');
   const [tenantLoginPin, setTenantLoginPin] = useState<string>('');
@@ -680,6 +680,16 @@ export default function App() {
     const savedStaff = sessionStorage.getItem('staffRole');
     return savedStaff === 'manager' ? 'sopheakDashboard' : 'invoice';
   });
+
+  // Strict RBAC guard: Manager is never allowed on revenue, invoice, or owner-only tabs
+  useEffect(() => {
+    if (staffRole === 'manager') {
+      const allowedManagerTabs = ['sopheakDashboard', 'checkInForm', 'tenants'];
+      if (!allowedManagerTabs.includes(activeTab)) {
+        setActiveTab('sopheakDashboard');
+      }
+    }
+  }, [staffRole, activeTab]);
   const [isNavMenuOpen, setIsNavMenuOpen] = useState<boolean>(false);
   const [isEditingTenantId, setIsEditingTenantId] = useState<boolean>(false);
   const [tempTenantId, setTempTenantId] = useState<string>('');
@@ -1220,12 +1230,55 @@ export default function App() {
     setInputWaterPrice(waterRiel / 4000);
   }, [inputWaterUsage]);
 
-  // Debounced Auto-save of Tenant information into Saved Tenant directory to capture live edits (Admin only)
+  // System-wide Auto-Update Notification State (triggered whenever a new tenant is added or an existing tenant is edited)
+  const [systemSyncNotice, setSystemSyncNotice] = useState<{
+    roomNo: string;
+    tenantName: string;
+    action: 'new' | 'edit' | 'vacate' | 'utility';
+    time: string;
+  } | null>(null);
+
+  const triggerSystemSyncNotice = (info: { roomNo: string; tenantName: string; action: 'new' | 'edit' | 'vacate' | 'utility' }) => {
+    setSystemSyncNotice({
+      ...info,
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    });
+  };
+
+  useEffect(() => {
+    if (!systemSyncNotice) return;
+    const t = setTimeout(() => setSystemSyncNotice(null), 5000);
+    return () => clearTimeout(t);
+  }, [systemSyncNotice]);
+
+  // Cross-tab & local storage synchronization listener
+  useEffect(() => {
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === 'savedTenants' && e.newValue) {
+        try {
+          setSavedTenants(JSON.parse(e.newValue));
+        } catch {}
+      } else if (e.key === 'invoice_history' && e.newValue) {
+        try {
+          setHistory(JSON.parse(e.newValue));
+        } catch {}
+      } else if (e.key === 'vacant_rooms_meta' && e.newValue) {
+        try {
+          setVacantRoomsMeta(JSON.parse(e.newValue));
+        } catch {}
+      }
+    };
+    window.addEventListener('storage', handleStorageChange);
+    return () => window.removeEventListener('storage', handleStorageChange);
+  }, []);
+
+  // Debounced Auto-save of Tenant information into Saved Tenant directory & History to capture live edits
   useEffect(() => {
     if (!isLoggedIn || userRole !== 'admin') return;
     const timer = setTimeout(() => {
       const name = data.tenantName?.trim();
-      if (!name) return;
+      const cleanRoom = normalizeRoomKey(data.roomNo);
+      if (!name || !cleanRoom) return;
 
       const roomItem = data.items.find(item => item.description.includes('តម្លៃបន្ទប់') || item.description.includes('Room Price'));
       const wifiItem = data.items.find(item => item.description.includes('វ៉ាយហ្វាយ') || item.description.includes('Wi-Fi'));
@@ -1233,23 +1286,39 @@ export default function App() {
       const waterItem = data.items.find(item => item.description.includes('ទឹក') || item.description.includes('Water'));
 
       setSavedTenants(prev => {
-        const existingIdx = prev.findIndex(t => t.tenantName.trim().toLowerCase() === name.toLowerCase());
-        let updatedList = [...prev];
-        
+        const roomIdx = prev.findIndex(t => normalizeRoomKey(t.roomNo) === cleanRoom);
+        const nameIdx = prev.findIndex(t => t.tenantName.trim().toLowerCase() === name.toLowerCase());
+        const existingIdx = roomIdx > -1 ? roomIdx : nameIdx;
         const existingRecord = existingIdx > -1 ? prev[existingIdx] : null;
 
         const newRecord: SavedTenant = {
           tenantName: name,
-          roomNo: data.roomNo || existingRecord?.roomNo || '',
+          roomNo: cleanRoom,
           tenantPhone: data.tenantPhone || existingRecord?.tenantPhone || '',
-          tenantIdNo: data.tenantIdNo || existingRecord?.tenantIdNo || '',
-          checkInDate: data.checkInDate || existingRecord?.checkInDate || '',
+          tenantIdNo: data.tenantIdNo || existingRecord?.tenantIdNo || formatTenantId(cleanRoom),
+          checkInDate: data.checkInDate || existingRecord?.checkInDate || new Date().toISOString().split('T')[0],
           roomPrice: roomItem ? roomItem.unitPrice : (existingRecord?.roomPrice ?? 80),
           wifiPrice: wifiItem ? wifiItem.unitPrice : (existingRecord?.wifiPrice ?? 0),
-          elecOld: elecItem ? elecItem.oldMonthNo : (existingRecord?.elecOld ?? ''),
-          waterOld: waterItem ? waterItem.oldMonthNo : (existingRecord?.waterOld ?? ''),
+          elecOld: elecItem ? elecItem.oldMonthNo : (existingRecord?.elecOld ?? '0'),
+          waterOld: waterItem ? waterItem.oldMonthNo : (existingRecord?.waterOld ?? '0'),
+          deposit: existingRecord?.deposit ?? (roomItem ? roomItem.unitPrice : 80),
+          isPaid: existingRecord?.isPaid ?? false
         };
 
+        const isUnchanged = existingRecord &&
+          existingRecord.tenantName === newRecord.tenantName &&
+          normalizeRoomKey(existingRecord.roomNo) === newRecord.roomNo &&
+          existingRecord.tenantPhone === newRecord.tenantPhone &&
+          existingRecord.tenantIdNo === newRecord.tenantIdNo &&
+          existingRecord.checkInDate === newRecord.checkInDate &&
+          existingRecord.roomPrice === newRecord.roomPrice &&
+          existingRecord.wifiPrice === newRecord.wifiPrice &&
+          existingRecord.elecOld === newRecord.elecOld &&
+          existingRecord.waterOld === newRecord.waterOld;
+
+        if (isUnchanged) return prev;
+
+        const updatedList = [...prev];
         if (existingIdx > -1) {
           updatedList[existingIdx] = {
             ...updatedList[existingIdx],
@@ -1259,12 +1328,125 @@ export default function App() {
           updatedList.push(newRecord);
         }
         localStorage.setItem('savedTenants', JSON.stringify(updatedList));
+        triggerSystemSyncNotice({
+          roomNo: cleanRoom,
+          tenantName: name,
+          action: existingIdx > -1 ? 'edit' : 'new'
+        });
         return updatedList;
       });
-    }, 1000);
+
+      // Also automatically synchronize active (non-archived) records in history for this room
+      setHistory(prev => {
+        let changed = false;
+        const updated = prev.map(rec => {
+          const isArchived =
+            String(rec.id || '').startsWith('h-archived-') ||
+            rec.tenantName.includes('ចំណូលចាស់រក្សាទុក') ||
+            rec.tenantName.includes('Archived Revenue');
+          if (normalizeRoomKey(rec.roomNo) === cleanRoom && !isArchived && rec.tenantName !== name) {
+            changed = true;
+            return {
+              ...rec,
+              roomNo: cleanRoom,
+              tenantName: name
+            };
+          }
+          return rec;
+        });
+        if (changed) {
+          localStorage.setItem('invoice_history', JSON.stringify(updated));
+          return updated;
+        }
+        return prev;
+      });
+
+      if (normalizeRoomKey(inputRoomNo) === cleanRoom && inputTenantName !== name) {
+        setInputTenantName(name);
+      }
+    }, 650);
 
     return () => clearTimeout(timer);
   }, [data.tenantName, data.roomNo, data.tenantPhone, data.tenantIdNo, data.checkInDate, data.items]);
+
+  // Live Auto-Update when editing or entering tenant info inside the Sidebar Add/Edit Form
+  useEffect(() => {
+    if (!showAddForm || !editingTenantName) return;
+    const cleanRoom = normalizeRoomKey(newTenant.roomNo);
+    const cleanName = newTenant.tenantName.trim();
+    if (!cleanRoom || !cleanName) return;
+
+    const timer = setTimeout(() => {
+      setSavedTenants(prev => {
+        const idx = prev.findIndex(
+          t => normalizeRoomKey(t.roomNo) === cleanRoom || t.tenantName.toLowerCase() === editingTenantName.toLowerCase()
+        );
+        if (idx === -1) return prev;
+        const existing = prev[idx];
+        const updatedTenant: SavedTenant = {
+          ...existing,
+          ...newTenant,
+          roomNo: cleanRoom,
+          tenantName: cleanName,
+          tenantIdNo: newTenant.tenantIdNo.trim() || existing.tenantIdNo || formatTenantId(cleanRoom)
+        };
+        const isUnchanged =
+          existing.tenantName === updatedTenant.tenantName &&
+          normalizeRoomKey(existing.roomNo) === updatedTenant.roomNo &&
+          existing.tenantPhone === updatedTenant.tenantPhone &&
+          existing.roomPrice === updatedTenant.roomPrice &&
+          existing.wifiPrice === updatedTenant.wifiPrice &&
+          existing.elecOld === updatedTenant.elecOld &&
+          existing.waterOld === updatedTenant.waterOld &&
+          existing.checkInDate === updatedTenant.checkInDate;
+        if (isUnchanged) return prev;
+
+        const updatedList = [...prev];
+        updatedList[idx] = updatedTenant;
+        localStorage.setItem('savedTenants', JSON.stringify(updatedList));
+        setEditingTenantName(cleanName);
+        triggerSystemSyncNotice({
+          roomNo: cleanRoom,
+          tenantName: cleanName,
+          action: 'edit'
+        });
+        return updatedList;
+      });
+
+      setHistory(prev => {
+        let changed = false;
+        const updated = prev.map(rec => {
+          const isArchived =
+            String(rec.id || '').startsWith('h-archived-') ||
+            rec.tenantName.includes('ចំណូលចាស់រក្សាទុក') ||
+            rec.tenantName.includes('Archived Revenue');
+          if (normalizeRoomKey(rec.roomNo) === cleanRoom && !isArchived) {
+            const newRoomPrice = Number(newTenant.roomPrice) || rec.roomPrice;
+            const newWifiPrice = Number(newTenant.wifiPrice) || 0;
+            if (rec.tenantName !== cleanName || rec.roomPrice !== newRoomPrice) {
+              changed = true;
+              return {
+                ...rec,
+                roomNo: cleanRoom,
+                tenantName: cleanName,
+                roomPrice: newRoomPrice,
+                wifiPrice: newWifiPrice,
+                totalUsd: newRoomPrice + newWifiPrice + Number(rec.elecPrice || 0) + Number(rec.waterPrice || 0) + Number(rec.otherPrice || 0)
+              };
+            }
+          }
+          return rec;
+        });
+        if (changed) {
+          localStorage.setItem('invoice_history', JSON.stringify(updated));
+          return updated;
+        }
+        return prev;
+      });
+    }, 600);
+
+    return () => clearTimeout(timer);
+  }, [showAddForm, editingTenantName, newTenant]);
 
   const calculateTotal = (items: InvoiceItem[]) => {
     return items.reduce((acc, item) => {
@@ -1617,21 +1799,21 @@ export default function App() {
 
     const targetRoom = cleanRoom || (matchedOldTenant ? normalizeRoomKey(matchedOldTenant.roomNo) : '');
     const archiveLabel = newTenantName?.trim()
-      ? newTenantName.trim()
+      ? `${newTenantName.trim()} (ចំណូលចាស់បូកបន្ត / Cumulative Revenue)`
       : `បន្ទប់ ${formatRoomBadge(targetRoom || '0')} (ចំណូលចាស់រក្សាទុក / Archived Revenue)`;
 
     setHistory(prev => {
       let updated = [...prev];
 
-      // If the old tenant was marked as Paid for the current month but didn't have a history record yet, preserve it into history before deleting tenant
-      if (matchedOldTenant && matchedOldTenant.isPaid && targetRoom) {
+      // Preserve the old tenant's current month revenue into history before deleting tenant so landlord revenue is never lost
+      if (matchedOldTenant && targetRoom) {
         const currentYearMonth = new Date().toISOString().slice(0, 7); // e.g. "2026-10"
         const hasCurrentMonthRecord = updated.some(
           r => normalizeRoomKey(r.roomNo) === targetRoom && r.paymentDate.startsWith(currentYearMonth)
         );
         if (!hasCurrentMonthRecord) {
           const preservedRecord: InvoiceHistoryRecord = {
-            id: `h-preserved-${Date.now()}`,
+            id: `h-archived-${targetRoom}-${Date.now()}`,
             roomNo: targetRoom,
             tenantName: archiveLabel,
             paymentDate: `${currentYearMonth}-05`,
@@ -1649,13 +1831,14 @@ export default function App() {
         }
       }
 
-      // Scrub the deleted old tenant's personal name from historical records while keeping 100% of the monthly revenue figures intact for the landlord
-      updated = updated.map(rec => {
+      // Scrub the deleted old tenant's personal name from historical records & prefix IDs with h-archived- so new tenants accumulate (cộng dồn) on top
+      updated = updated.map((rec, idx) => {
         const sameRoom = targetRoom && normalizeRoomKey(rec.roomNo) === targetRoom;
         const sameOldName = oldTenantName && rec.tenantName.trim().toLowerCase() === oldTenantName.trim().toLowerCase();
         if (sameRoom || sameOldName) {
           return {
             ...rec,
+            id: rec.id.startsWith('h-archived-') ? rec.id : `h-archived-${rec.id}-${idx}`,
             roomNo: targetRoom || rec.roomNo,
             tenantName: archiveLabel
           };
@@ -1670,22 +1853,16 @@ export default function App() {
 
   // One-click purge of all former tenants' personal names across the system while preserving 100% of landlord monthly & cumulative revenue
   const handlePurgeAllFormerTenantsKeepRevenue = () => {
-    if (
-      !confirm(
-        trApp(
-          `តើអ្នកចង់លុបព័ត៌មានឈ្មោះភ្ញៀវចាស់ដែលឈប់ជួលទាំងអស់ ប៉ុន្តែរក្សាទុកទិន្នន័យចំណូលគ្រប់ខែនៅក្នុងតារាងចំណូលម្ចាស់ផ្ទះដើម្បីបូកបន្តមែនទេ?`,
-          `Do you want to clear all vacated tenants' personal names while keeping and accumulating 100% of monthly revenues in the landlord's revenue ledger?`
-        )
-      )
-    ) {
-      return;
-    }
     playAudioFeedback('success');
     setHistory(prev => {
       const updated = prev.map(rec => {
         const cRoom = normalizeRoomKey(rec.roomNo);
         const activeTenantInRoom = savedTenants.find(t => normalizeRoomKey(t.roomNo) === cRoom);
-        if (activeTenantInRoom) {
+        const isArchived =
+          String(rec.id || '').startsWith('h-archived-') ||
+          rec.tenantName.includes('ចំណូលចាស់រក្សាទុក') ||
+          rec.tenantName.includes('Archived Revenue');
+        if (activeTenantInRoom && !isArchived) {
           return {
             ...rec,
             roomNo: cRoom,
@@ -1694,6 +1871,7 @@ export default function App() {
         } else {
           return {
             ...rec,
+            id: isArchived ? rec.id : `h-archived-${cRoom || rec.roomNo}-${rec.id}`,
             roomNo: cRoom || rec.roomNo,
             tenantName: `បន្ទប់ ${formatRoomBadge(cRoom || rec.roomNo)} (ចំណូលចាស់រក្សាទុក / Archived Revenue)`
           };
@@ -1702,26 +1880,15 @@ export default function App() {
       localStorage.setItem('invoice_history', JSON.stringify(updated));
       return updated;
     });
-    alert(
-      trApp(
-        `បានលុបឈ្មោះភ្ញៀវចាស់ដែលឈប់ជួលរួចរាល់! ទិន្នន័យចំណូលខែមុនៗទាំងអស់ត្រូវបានរក្សាទុក និងបូកបន្តក្នុងតារាងចំណូលប្រចាំខែរបស់ម្ចាស់ផ្ទះ។`,
-        `Cleared vacated tenant names! All previous monthly revenue figures are preserved and continue accumulating in the landlord's monthly revenue table.`
-      )
-    );
+    triggerSystemSyncNotice({
+      roomNo: 'ALL',
+      tenantName: trApp('រក្សាទុកចំណូលម្ចាស់ផ្ទះគ្រប់បន្ទប់', 'All Rooms Cumulative Revenue Preserved'),
+      action: 'vacate'
+    });
   };
 
   // Vacate an occupied room (Clear vacated tenant personal info while preserving 100% of cumulative landlord revenue)
   const handleVacateRoom = (tenant: SavedTenant) => {
-    if (
-      !confirm(
-        trApp(
-          `តើអ្នកពិតជាចង់លុបព័ត៌មានភ្ញៀវឈប់ជួល "${tenant.tenantName}" ចេញពីបន្ទប់ ${formatRoomBadge(tenant.roomNo)} (ប៉ុន្តែរក្សាទុកចំណូលខែមុនៗទាំងអស់ក្នុងតារាងម្ចាស់ផ្ទះដើម្បីបូកបន្តពេលមានភ្ញៀវថ្មីចូលជួល) មែនទេ?`,
-          `Are you sure you want to clear vacated tenant "${tenant.tenantName}" from room ${formatRoomBadge(tenant.roomNo)} while keeping and accumulating all previous monthly revenues for the landlord?`
-        )
-      )
-    ) {
-      return;
-    }
     playAudioFeedback('delete');
     const cleanRoom = normalizeRoomKey(tenant.roomNo) || tenant.roomNo;
 
@@ -1761,6 +1928,12 @@ export default function App() {
         tenantIdNo: ''
       }));
     }
+
+    triggerSystemSyncNotice({
+      roomNo: cleanRoom,
+      tenantName: trApp(`បន្ទប់ ${formatRoomBadge(cleanRoom)} ទំនេរ (រក្សាទុកចំណូលបូកបន្ត)`, `Room ${formatRoomBadge(cleanRoom)} Vacated (Revenue Preserved)`),
+      action: 'vacate'
+    });
   };
 
   // Submit the Dedicated Manager Vacant Room Check-In Form
@@ -1770,21 +1943,12 @@ export default function App() {
     const cleanName = checkInFormData.tenantName.trim();
 
     if (!cleanRoomNo || !cleanName) {
-      alert(trApp("សូមជ្រើសរើសបន្ទប់ទំនេរ និងបញ្ចូលឈ្មោះភ្ញៀវជួល!", "Please select a vacant room and enter the tenant's full name!"));
       return;
     }
 
     const existingOccupied = savedTenants.find(t => normalizeRoomKey(t.roomNo).toLowerCase() === cleanRoomNo.toLowerCase());
-    if (existingOccupied) {
-      if (!confirm(trApp(
-        `បន្ទប់ ${formatRoomBadge(cleanRoomNo)} មានភ្ញៀវឈ្មោះ "${existingOccupied.tenantName}" រួចហើយ។ តើអ្នកចង់លុបភ្ញៀវចាស់ ហើយជំនួសដោយភ្ញៀវថ្មី "${cleanName}" (ចំណូលចាស់នៅតែរក្សាទុកបូកបន្ត) មែនទេ?`,
-        `Room ${formatRoomBadge(cleanRoomNo)} currently has tenant "${existingOccupied.tenantName}". Do you want to replace with new tenant "${cleanName}" while keeping all previous monthly revenues accumulated for the landlord?`
-      ))) {
-        return;
-      }
-    }
 
-    // Preserve all previous revenue of this room and associate room history with the new tenant so landlord revenue accumulates seamlessly
+    // Preserve all previous revenue of this room and archive old tenant records so landlord revenue accumulates seamlessly
     archiveOldTenantRevenueAndPurgeProfile(cleanRoomNo, existingOccupied?.tenantName, cleanName);
 
     const finalIdNo = checkInFormData.tenantIdNo.trim() || formatTenantId(cleanRoomNo);
@@ -1810,9 +1974,42 @@ export default function App() {
       return updatedList;
     });
 
-    // Also load this newly checked-in tenant onto the active invoice draft
+    // Add new tenant's initial revenue record on top of archived records so landlord cumulative revenue immediately increases (cộng dồn)
+    setHistory(prev => {
+      const checkInMonth = (newCheckedInTenant.checkInDate || new Date().toISOString().split('T')[0]).slice(0, 7);
+      const newCheckInRecord: InvoiceHistoryRecord = {
+        id: `h-checkin-${cleanRoomNo}-${Date.now()}`,
+        roomNo: cleanRoomNo,
+        tenantName: cleanName,
+        paymentDate: `${checkInMonth}-05`,
+        roomPrice: newCheckedInTenant.roomPrice,
+        wifiPrice: newCheckedInTenant.wifiPrice,
+        elecPrice: 0,
+        waterPrice: 0,
+        otherPrice: 0,
+        totalUsd: newCheckedInTenant.roomPrice + newCheckedInTenant.wifiPrice,
+        elecUsage: 0,
+        waterUsage: 0,
+        status: newCheckedInTenant.isPaid ? 'PAID' : 'UNPAID'
+      };
+      const updated = [newCheckInRecord, ...prev];
+      localStorage.setItem('invoice_history', JSON.stringify(updated));
+      return updated;
+    });
+
+    // Also load this newly checked-in tenant onto the active draft & monthly input
     handleSelectTenant(newCheckedInTenant);
+    setInputRoomNo(cleanRoomNo);
+    setInputTenantName(cleanName);
+    setInputRoomPrice(newCheckedInTenant.roomPrice);
+    setInputWifiPrice(newCheckedInTenant.wifiPrice);
     playAudioFeedback('success');
+
+    triggerSystemSyncNotice({
+      roomNo: cleanRoomNo,
+      tenantName: cleanName,
+      action: 'new'
+    });
 
     setCheckInSuccessInfo({
       roomNo: cleanRoomNo,
@@ -1873,6 +2070,11 @@ export default function App() {
           tenantIdNo: ''
         }));
       }
+      triggerSystemSyncNotice({
+        roomNo: cleanRoom,
+        tenantName: trApp(`បន្ទប់ ${formatRoomBadge(cleanRoom)} ទំនេរ`, `Room ${formatRoomBadge(cleanRoom)} Vacated`),
+        action: 'vacate'
+      });
     }
     setSavedTenants(prev => {
       const updatedList = prev.filter(t => t.tenantName !== nameToDelete);
@@ -1893,65 +2095,110 @@ export default function App() {
     }, 100);
   };
 
-  // Handle Add/Edit Form submission (preserves and accumulates previous room revenue when changing tenant)
+  // Handle Add/Edit Form submission (preserves and accumulates previous room revenue when changing tenant, and updates active records when editing)
   const handleFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTenant.tenantName.trim() || !newTenant.roomNo.trim()) {
-      alert("សូមបញ្ចូលឈ្មោះអ្នកជួល និងលេខបន្ទប់! / Please enter Tenant Name and Room Number!");
       return;
     }
 
     const cleanRoom = normalizeRoomKey(newTenant.roomNo) || newTenant.roomNo.trim();
+    const cleanName = newTenant.tenantName.trim();
     const normalizedNewTenant: SavedTenant = {
       ...newTenant,
       roomNo: cleanRoom,
-      tenantName: newTenant.tenantName.trim()
+      tenantName: cleanName,
+      tenantIdNo: newTenant.tenantIdNo.trim() || formatTenantId(cleanRoom)
     };
 
-    // Preserve previous room revenue in history and link to the updated tenant name so landlord monthly & cumulative revenue is never lost
-    archiveOldTenantRevenueAndPurgeProfile(cleanRoom, editingTenantName || undefined, normalizedNewTenant.tenantName);
+    if (editingTenantName) {
+      // Editing an existing tenant: update their active (non-archived) records in history while keeping all archived records untouched
+      setHistory(prev => {
+        const updated = prev.map(rec => {
+          const isArchived =
+            String(rec.id || '').startsWith('h-archived-') ||
+            rec.tenantName.includes('ចំណូលចាស់រក្សាទុក') ||
+            rec.tenantName.includes('Archived Revenue');
+          if (normalizeRoomKey(rec.roomNo) === cleanRoom && !isArchived) {
+            const newRoomPrice = Number(normalizedNewTenant.roomPrice) || rec.roomPrice;
+            const newWifiPrice = Number(normalizedNewTenant.wifiPrice) || 0;
+            return {
+              ...rec,
+              roomNo: cleanRoom,
+              tenantName: cleanName,
+              roomPrice: newRoomPrice,
+              wifiPrice: newWifiPrice,
+              totalUsd: newRoomPrice + newWifiPrice + Number(rec.elecPrice || 0) + Number(rec.waterPrice || 0) + Number(rec.otherPrice || 0)
+            };
+          }
+          return rec;
+        });
+        localStorage.setItem('invoice_history', JSON.stringify(updated));
+        return updated;
+      });
+    } else {
+      // Adding a new tenant or replacing a room's tenant: archive old tenant revenue so cumulative revenue accumulates (cộng dồn)
+      const existingOccupied = savedTenants.find(t => normalizeRoomKey(t.roomNo) === cleanRoom);
+      archiveOldTenantRevenueAndPurgeProfile(cleanRoom, existingOccupied?.tenantName, cleanName);
+      setHistory(prev => {
+        const checkInMonth = (normalizedNewTenant.checkInDate || new Date().toISOString().split('T')[0]).slice(0, 7);
+        const newCheckInRecord: InvoiceHistoryRecord = {
+          id: `h-checkin-${cleanRoom}-${Date.now()}`,
+          roomNo: cleanRoom,
+          tenantName: cleanName,
+          paymentDate: `${checkInMonth}-05`,
+          roomPrice: Number(normalizedNewTenant.roomPrice) || 80,
+          wifiPrice: Number(normalizedNewTenant.wifiPrice) || 0,
+          elecPrice: 0,
+          waterPrice: 0,
+          otherPrice: 0,
+          totalUsd: (Number(normalizedNewTenant.roomPrice) || 80) + (Number(normalizedNewTenant.wifiPrice) || 0),
+          elecUsage: 0,
+          waterUsage: 0,
+          status: normalizedNewTenant.isPaid ? 'PAID' : 'UNPAID'
+        };
+        const updated = [newCheckInRecord, ...prev];
+        localStorage.setItem('invoice_history', JSON.stringify(updated));
+        return updated;
+      });
+    }
 
     setSavedTenants(prev => {
       let updatedList = [...prev];
-      
       if (editingTenantName) {
-        // Edit Mode: Replace the original record (matched by original name) with edited values
-        const idx = updatedList.findIndex(t => t.tenantName.toLowerCase() === editingTenantName.toLowerCase());
+        const idx = updatedList.findIndex(
+          t => t.tenantName.toLowerCase() === editingTenantName.toLowerCase() || normalizeRoomKey(t.roomNo) === cleanRoom
+        );
         if (idx > -1) {
-          const mergedTenant = {
-            ...normalizedNewTenant,
-            tenantIdNo: normalizedNewTenant.tenantIdNo.trim() || updatedList[idx].tenantIdNo || ''
+          updatedList[idx] = {
+            ...updatedList[idx],
+            ...normalizedNewTenant
           };
-          updatedList[idx] = mergedTenant;
         } else {
           updatedList.push(normalizedNewTenant);
         }
       } else {
-        // Add Mode: Check duplicate safety
-        const exists = updatedList.some(t => t.tenantName.toLowerCase() === normalizedNewTenant.tenantName.toLowerCase() || normalizeRoomKey(t.roomNo) === cleanRoom);
-        if (exists) {
-          if (!confirm(trApp(
-            `អ្នកជួល ឬលេខបន្ទប់នេះមានរួចហើយនៅក្នុងបញ្ជី។ តើអ្នកចង់ប្តូរភ្ញៀវថ្មី (រក្សាទុកចំណូលចាស់បូកបន្ត) ដែរឬទេ?`,
-            `This room is currently occupied. Do you want to update to the new tenant while preserving and accumulating all previous monthly revenues for the landlord?`
-          ))) {
-            return prev;
-          }
-        }
-        updatedList = updatedList.filter(t => t.tenantName.toLowerCase() !== normalizedNewTenant.tenantName.toLowerCase() && normalizeRoomKey(t.roomNo) !== cleanRoom);
+        updatedList = updatedList.filter(t => normalizeRoomKey(t.roomNo) !== cleanRoom);
         updatedList.push(normalizedNewTenant);
       }
-      
       localStorage.setItem('savedTenants', JSON.stringify(updatedList));
       return updatedList;
     });
 
-    // If the edited tenant is currently active on the invoice, update the invoice view instantly!
-    if ((editingTenantName && data.tenantName.toLowerCase() === editingTenantName.toLowerCase()) || normalizeRoomKey(data.roomNo) === cleanRoom) {
-      handleSelectTenant(normalizedNewTenant);
+    // Update active invoice and monthly input state immediately
+    handleSelectTenant(normalizedNewTenant);
+    if (normalizeRoomKey(inputRoomNo) === cleanRoom) {
+      setInputTenantName(cleanName);
+      setInputRoomPrice(Number(normalizedNewTenant.roomPrice) || 80);
+      setInputWifiPrice(Number(normalizedNewTenant.wifiPrice) || 0);
     }
 
     playAudioFeedback('success');
-    alert(editingTenantName ? `បានធ្វើបច្ចុប្បន្នភាពព័ត៌មានបន្ទប់ ${formatRoomBadge(cleanRoom)} ដោយជោគជ័យ (ចំណូលចាស់នៅតែរក្សាទុកបូកបន្ត)!` : `បានបន្ថែម/ប្តូរភ្ញៀវបន្ទប់ ${formatRoomBadge(cleanRoom)} ដោយជោគជ័យ (ចំណូលចាស់នៅតែរក្សាទុកបូកបន្ត)!`);
+    triggerSystemSyncNotice({
+      roomNo: cleanRoom,
+      tenantName: cleanName,
+      action: editingTenantName ? 'edit' : 'new'
+    });
     
     // Close and reset form
     setShowAddForm(false);
@@ -2602,11 +2849,13 @@ export default function App() {
     alert(`ទិន្នន័យខែ ${parseInt(formMonth)} ត្រូវបានរក្សាទុកដោយជោគជ័យ! / Month ${parseInt(formMonth)} data saved successfully!`);
   };
 
-  // Submit customer monthly input form (Add or Edit)
+  // Submit customer monthly input form (Add or Edit) — also synchronizes tenant name & room price across savedTenants
   const handleSaveCustomerMonthlyInput = (e: React.FormEvent) => {
     e.preventDefault();
     const formattedMonth = inputMonth.padStart(2, '0');
     const currentYear = new Date().getFullYear();
+    const cleanRoom = normalizeRoomKey(inputRoomNo) || inputRoomNo;
+    const cleanTenantName = inputTenantName.trim();
     
     // Set a default date for the payment month if not selected
     let paymentDate = inputPaymentDate;
@@ -2616,6 +2865,47 @@ export default function App() {
 
     const calculatedTotal = Number(inputRoomPrice) + Number(inputWifiPrice) + Number(inputElecPrice) + Number(inputWaterPrice) + Number(inputOtherPrice);
 
+    // If a valid tenant name was entered or edited in the monthly input form, automatically sync savedTenants as well
+    const isPlaceholderVacantName =
+      !cleanTenantName ||
+      cleanTenantName.includes('ទំនេរ') ||
+      cleanTenantName.includes('Vacant') ||
+      cleanTenantName.includes('ចំណូលចាស់រក្សាទុក') ||
+      cleanTenantName.includes('Archived Revenue');
+
+    if (!isPlaceholderVacantName && cleanRoom) {
+      setSavedTenants(prev => {
+        const idx = prev.findIndex(t => normalizeRoomKey(t.roomNo) === cleanRoom);
+        const updatedList = [...prev];
+        if (idx > -1) {
+          updatedList[idx] = {
+            ...updatedList[idx],
+            roomNo: cleanRoom,
+            tenantName: cleanTenantName,
+            roomPrice: Number(inputRoomPrice) || updatedList[idx].roomPrice || 80,
+            wifiPrice: Number(inputWifiPrice) || 0,
+            isPaid: inputStatus === 'PAID'
+          };
+        } else {
+          updatedList.push({
+            roomNo: cleanRoom,
+            tenantName: cleanTenantName,
+            tenantPhone: '',
+            tenantIdNo: formatTenantId(cleanRoom),
+            checkInDate: paymentDate,
+            roomPrice: Number(inputRoomPrice) || 80,
+            wifiPrice: Number(inputWifiPrice) || 0,
+            elecOld: '0',
+            waterOld: '0',
+            deposit: Number(inputRoomPrice) || 80,
+            isPaid: inputStatus === 'PAID'
+          });
+        }
+        localStorage.setItem('savedTenants', JSON.stringify(updatedList));
+        return updatedList;
+      });
+    }
+
     if (editingRecordId) {
       // Edit mode: update existing record in history
       setHistory(prev => {
@@ -2623,8 +2913,8 @@ export default function App() {
           if (rec.id === editingRecordId) {
             return {
               ...rec,
-              roomNo: inputRoomNo,
-              tenantName: inputTenantName,
+              roomNo: cleanRoom,
+              tenantName: cleanTenantName || rec.tenantName,
               paymentDate: paymentDate,
               roomPrice: Number(inputRoomPrice),
               wifiPrice: Number(inputWifiPrice),
@@ -2642,15 +2932,19 @@ export default function App() {
         localStorage.setItem('invoice_history', JSON.stringify(updated));
         return updated;
       });
-      alert(`កែសម្រួលទិន្នន័យបានជោគជ័យ! / Updated room ${inputRoomNo} records successfully!`);
       playAudioFeedback('success');
       setEditingRecordId(null);
+      triggerSystemSyncNotice({
+        roomNo: cleanRoom,
+        tenantName: cleanTenantName || cleanRoom,
+        action: 'edit'
+      });
     } else {
       // Add mode: create new record
       const newRecord: InvoiceHistoryRecord = {
         id: `h-manual-${Date.now()}`,
-        roomNo: inputRoomNo,
-        tenantName: inputTenantName,
+        roomNo: cleanRoom,
+        tenantName: cleanTenantName || `បន្ទប់ ${formatRoomBadge(cleanRoom)}`,
         paymentDate: paymentDate,
         roomPrice: Number(inputRoomPrice),
         wifiPrice: Number(inputWifiPrice),
@@ -2667,8 +2961,12 @@ export default function App() {
         localStorage.setItem('invoice_history', JSON.stringify(updated));
         return updated;
       });
-      alert(`បានកត់ត្រាទិន្នន័យថ្មីដោយជោគជ័យ! / Recorded new readings for room ${inputRoomNo} successfully!`);
       playAudioFeedback('success');
+      triggerSystemSyncNotice({
+        roomNo: cleanRoom,
+        tenantName: cleanTenantName || cleanRoom,
+        action: 'utility'
+      });
     }
 
     // Reset temporary fields
@@ -2694,29 +2992,19 @@ export default function App() {
   // Delete old tenant profile for a specific room while preserving all monthly revenue for the landlord
   const handleDeleteAllRecordsForRoom = (roomNo: string, tenantName: string) => {
     const cleanRoom = normalizeRoomKey(roomNo) || roomNo;
-    if (
-      window.confirm(
-        trApp(
-          `តើអ្នកចង់លុបព័ត៌មានភ្ញៀវចាស់ (${tenantName}) នៃបន្ទប់ ${formatRoomBadge(cleanRoom)} ប៉ុន្តែរក្សាទុកទិន្នន័យចំណូលគ្រប់ខែនៅក្នុងតារាងចំណូលម្ចាស់ផ្ទះដើម្បីបូកបន្តមែនទេ?`,
-          `Do you want to clear vacated tenant (${tenantName}) from room ${formatRoomBadge(cleanRoom)} while keeping and accumulating all previous monthly revenue figures in the landlord's revenue table?`
-        )
-      )
-    ) {
-      archiveOldTenantRevenueAndPurgeProfile(cleanRoom, tenantName);
-      setSavedTenants(prev => {
-        const updatedList = prev.filter(t => normalizeRoomKey(t.roomNo) !== cleanRoom);
-        localStorage.setItem('savedTenants', JSON.stringify(updatedList));
-        return updatedList;
-      });
-      setInputTenantName(`បន្ទប់ ${formatRoomBadge(cleanRoom)} (ទំនេរ / Vacant)`);
-      playAudioFeedback('success');
-      alert(
-        trApp(
-          `បានលុបព័ត៌មានភ្ញៀវចាស់នៃបន្ទប់ ${formatRoomBadge(cleanRoom)} រួចរាល់! ទិន្នន័យចំណូលខែមុនៗនៅតែរក្សាទុក និងបូកបន្តក្នុងតារាងចំណូលម្ចាស់ផ្ទះ។`,
-          `Cleared vacated tenant info for room ${formatRoomBadge(cleanRoom)}! All previous monthly revenues remain saved and continue accumulating for the landlord.`
-        )
-      );
-    }
+    archiveOldTenantRevenueAndPurgeProfile(cleanRoom, tenantName);
+    setSavedTenants(prev => {
+      const updatedList = prev.filter(t => normalizeRoomKey(t.roomNo) !== cleanRoom);
+      localStorage.setItem('savedTenants', JSON.stringify(updatedList));
+      return updatedList;
+    });
+    setInputTenantName(`បន្ទប់ ${formatRoomBadge(cleanRoom)} (ទំនេរ / Vacant)`);
+    playAudioFeedback('success');
+    triggerSystemSyncNotice({
+      roomNo: cleanRoom,
+      tenantName: trApp(`បន្ទប់ ${formatRoomBadge(cleanRoom)} ទំនេរ (រក្សាទុកចំណូលបូកបន្ត)`, `Room ${formatRoomBadge(cleanRoom)} Vacated (Revenue Preserved)`),
+      action: 'vacate'
+    });
   };
 
   // Get list of all 16 room entries (RM-01 to RM-16) with cumulative revenue (accumulates old tenant revenue + new tenant revenue per room for the landlord)
@@ -2948,6 +3236,17 @@ export default function App() {
         return;
       }
 
+      // Validate Owner / Admin password (280819)
+      if (loginPassword.trim() !== '280819') {
+        alert(
+          trApp(
+            '⛔ ពាក្យសម្ងាត់ម្ចាស់ផ្ទះ (Admin) មិនត្រឹមត្រូវទេ!',
+            '⛔ Incorrect Admin password!'
+          )
+        );
+        return;
+      }
+
       playAudioFeedback('success');
       setStaffRole('admin');
       setUserRole('admin');
@@ -3072,162 +3371,132 @@ export default function App() {
           </p>
         </motion.div>
 
-        {/* Central Green Login Card with White Text & 2 Role Options: Admin & Manager */}
+        {/* Central Green Login Card - Compact Admin & Manager Login */}
         <motion.div 
-          initial={{ opacity: 0, y: 30 }}
+          initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.6, delay: 0.1 }}
-          className="w-full max-w-md bg-gradient-to-b from-emerald-700 via-emerald-800 to-[#0a3622] backdrop-blur-xl rounded-[2.2rem] shadow-[0_25px_60px_-15px_rgba(0,0,0,0.75)] p-6 sm:p-8 border-2 border-emerald-400/70 flex flex-col gap-4 my-6 sm:my-8 z-10 hover:shadow-emerald-500/25 transition-all duration-300 relative text-white"
+          transition={{ duration: 0.5, delay: 0.1 }}
+          className="w-full max-w-sm bg-gradient-to-b from-emerald-700 via-emerald-800 to-[#0a3622] backdrop-blur-xl rounded-3xl shadow-[0_20px_50px_-12px_rgba(0,0,0,0.75)] p-5 sm:p-6 border-2 border-emerald-400/70 flex flex-col gap-3.5 my-4 z-10 text-white"
         >
-          {/* Card Title Header - 2 Roles: Admin • Manager */}
+          {/* Compact Card Header */}
           <div className="text-center">
-            <h2 className="text-xl sm:text-2xl font-normal text-white font-moul leading-normal drop-shadow">
+            <h2 className="text-lg sm:text-xl font-normal text-white font-moul leading-normal drop-shadow">
               {trApp('ចូលប្រព័ន្ធ', 'SYSTEM LOGIN')}
             </h2>
-            <p className="text-xs sm:text-sm font-black text-white uppercase tracking-[0.18em] font-sans mt-1">
+            <p className={`text-xs font-extrabold text-emerald-100 font-sans mt-0.5 ${appLang === 'en' ? 'uppercase tracking-widest' : ''}`}>
               {trApp('ម្ចាស់ផ្ទះ • អ្នកគ្រប់គ្រង', 'ADMIN • MANAGER')}
             </p>
           </div>
 
-          {/* 2-Tab Segmented Role Switcher: Admin | Manager */}
-          <div className="bg-emerald-950/80 p-1.5 rounded-2xl grid grid-cols-2 gap-2 border border-emerald-400/50 my-1 font-sans">
+          {/* Compact 2-Tab Role Switcher: Admin | Manager */}
+          <div className="bg-emerald-950/80 p-1 rounded-xl grid grid-cols-2 gap-1.5 border border-emerald-400/50 font-sans">
             <button
               type="button"
-              onClick={() => { playAudioFeedback('click'); setLoginTab('admin'); }}
-              className={`py-2.5 px-3 rounded-xl text-xs sm:text-sm font-extrabold transition-all flex items-center justify-center gap-2 cursor-pointer ${
+              onClick={() => {
+                playAudioFeedback('click');
+                setLoginTab('admin');
+                setLoginUsername('admin');
+                setLoginPassword('');
+              }}
+              className={`py-2 px-2.5 rounded-lg text-xs font-extrabold transition-all flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer ${
                 loginTab === 'admin' 
-                  ? 'bg-emerald-500 text-white font-black shadow-md border border-white/60' 
+                  ? 'bg-emerald-500 text-white font-black shadow border border-white/60' 
                   : 'text-white/80 hover:text-white hover:bg-emerald-800/60'
               }`}
             >
-              <Home className="w-4 h-4 text-white shrink-0" />
+              <Home className="w-3.5 h-3.5 text-white shrink-0" />
               <span>{trApp('ម្ចាស់ផ្ទះ (Admin)', 'Admin')}</span>
             </button>
 
             <button
               type="button"
-              onClick={() => { playAudioFeedback('click'); setLoginTab('manager'); }}
-              className={`py-2.5 px-3 rounded-xl text-xs sm:text-sm font-extrabold transition-all flex items-center justify-center gap-2 cursor-pointer ${
+              onClick={() => {
+                playAudioFeedback('click');
+                setLoginTab('manager');
+                setLoginUsername('sopheak');
+                setLoginPassword('');
+              }}
+              className={`py-2 px-2.5 rounded-lg text-xs font-extrabold transition-all flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer ${
                 loginTab === 'manager' 
-                  ? 'bg-emerald-500 text-white font-black shadow-md border border-white/60' 
+                  ? 'bg-emerald-500 text-white font-black shadow border border-white/60' 
                   : 'text-white/80 hover:text-white hover:bg-emerald-800/60'
               }`}
             >
-              <Users className="w-4 h-4 text-white shrink-0" />
+              <Users className="w-3.5 h-3.5 text-white shrink-0" />
               <span>{trApp('អ្នកគ្រប់គ្រង (Manager)', 'Manager')}</span>
             </button>
           </div>
 
-          {/* All 16 Rooms Dropdown Selector (RM-01 to RM-16) - Displays ONLY Room Numbers */}
-          <div className="space-y-1.5 font-sans">
-            <label className="text-xs font-extrabold text-white flex items-center justify-between">
-              <span className="flex items-center gap-1.5">
-                <Home className="w-3.5 h-3.5 text-white" />
-                <span>{trApp('ជ្រើសរើសលេខបន្ទប់ (ទាំង ១៦ បន្ទប់)៖', 'Select Room Number (All 16 Rooms):')}</span>
-              </span>
-              <span className="text-[10px] font-black bg-emerald-600/90 border border-white/40 px-2 py-0.5 rounded-full text-white">
-                16 {trApp('បន្ទប់', 'Rooms')}
-              </span>
-            </label>
-            <div className="relative flex items-center">
-              <select
-                value={selectedLoginRoom}
-                onChange={(e) => handleSelectRoomFromLoginDropdown(e.target.value)}
-                className="w-full pl-3.5 pr-10 py-3 bg-emerald-950/85 hover:bg-emerald-950 border-2 border-white/80 rounded-xl outline-none focus:border-white focus:ring-2 focus:ring-white/40 text-white text-xs sm:text-sm font-extrabold transition-all shadow-inner cursor-pointer appearance-none font-sans"
-              >
-                <option value="" className="bg-emerald-950 text-white font-bold">
-                  {trApp('-- ជ្រើសរើសលេខបន្ទប់ (RM-01 ដល់ RM-16) --', '-- Select Room Number (RM-01 to RM-16) --')}
-                </option>
-                {ALL_STANDARD_ROOMS.map((rNo) => (
-                  <option
-                    key={`login-room-std-${rNo}`}
-                    value={rNo}
-                    className="bg-emerald-950 text-white font-bold py-1"
-                  >
-                    {formatRoomBadge(rNo)}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown className="w-4 h-4 text-white absolute right-3.5 pointer-events-none" />
-            </div>
-          </div>
-
-          {/* ADMIN OR MANAGER LOGIN FORM - CONCISE GREEN & WHITE */}
-          <form onSubmit={handleAdminLoginSubmit} className="flex flex-col gap-3.5 font-sans text-white">
-            <div className="bg-emerald-950/60 border border-emerald-400/50 rounded-2xl p-3 text-xs text-white flex items-center justify-between">
-              <div className="flex items-center gap-2 font-extrabold text-white">
-                {loginTab === 'admin' ? <Home className="w-4 h-4 text-white" /> : <Users className="w-4 h-4 text-white" />}
-                <span>
-                  {loginTab === 'admin'
-                    ? trApp('ម្ចាស់កម្មសិទ្ធិ • ហេង សំណាង (HSN)', 'Owner • HENG SAMNANG (HSN)')
-                    : trApp('អ្នកគ្រប់គ្រង • ងួន សុភ័ក្រ (Nguon Sopheak)', 'Manager • Nguon Sopheak')}
-                </span>
-              </div>
-              <span className="text-[10px] font-black uppercase bg-emerald-600 border border-white/40 px-2.5 py-0.5 rounded-md text-white">
-                {loginTab === 'admin' ? trApp('ម្ចាស់ផ្ទះ', 'OWNER') : trApp('អ្នកគ្រប់គ្រង', 'MANAGER')}
-              </span>
-            </div>
-
+          {/* Compact Login & Password Form */}
+          <form onSubmit={handleAdminLoginSubmit} className="flex flex-col gap-3 font-sans text-white">
             {/* Username Input Field */}
             <div className="space-y-1">
-              <label className="text-xs font-bold text-white flex items-center justify-between">
+              <div className="flex items-center justify-between text-xs font-bold text-white">
                 <span>
-                  {trApp(
-                    `ឈ្មោះអ្នកប្រើប្រាស់ (${loginTab === 'admin' ? 'ម្ចាស់ផ្ទះ HSN' : 'ងួន សុភ័ក្រ'})៖`,
-                    `Username (${loginTab === 'admin' ? 'Owner HSN' : 'Nguon Sopheak'}):`
-                  )}
+                  {loginTab === 'admin'
+                    ? trApp('គណនី (Admin)៖', 'Username (Admin):')
+                    : trApp('គណនី (អ្នកគ្រប់គ្រង)៖', 'Username (Manager):')}
                 </span>
-              </label>
+                {loginTab === 'manager' && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playAudioFeedback('click');
+                      setLoginUsername('sopheak');
+                      setLoginPassword('sopheak168');
+                    }}
+                    className="text-[11px] text-amber-300 hover:text-amber-200 font-extrabold underline cursor-pointer"
+                  >
+                    {trApp('បំពេញស្វ័យប្រវត្តិ', 'Auto-fill')}
+                  </button>
+                )}
+              </div>
               <div className="relative flex items-center">
-                <span className="absolute left-3.5 text-white">
-                  <User className="w-4 h-4 text-white" />
-                </span>
+                <User className="w-4 h-4 text-white/90 absolute left-3" />
                 <input 
                   type="text"
                   required
-                  placeholder={loginTab === 'admin' ? 'admin (HENG SAMNANG)' : 'sopheak (Nguon Sopheak)'}
-                  className="w-full pl-10 pr-4 py-3 bg-emerald-950/70 border-2 border-white/70 rounded-xl outline-none focus:border-white focus:ring-2 focus:ring-white/40 text-white text-sm font-bold transition-all shadow-inner placeholder:text-white/60 font-sans"
+                  placeholder={loginTab === 'admin' ? 'admin' : 'sopheak'}
+                  className="w-full pl-9 pr-3 py-2.5 bg-emerald-950/75 border border-white/70 rounded-xl outline-none focus:border-white focus:ring-2 focus:ring-white/30 text-white text-sm font-bold transition-all placeholder:text-white/50 font-sans"
                   value={loginUsername}
                   onChange={(e) => setLoginUsername(e.target.value)}
                 />
               </div>
             </div>
 
-            {/* Password Input Field with toggling visibility eye */}
+            {/* Password Input Field */}
             <div className="space-y-1">
-              <label className="text-xs font-bold text-white flex items-center justify-between">
-                <span>{trApp('ពាក្យសម្ងាត់៖', 'Password:')}</span>
+              <label className="text-xs font-bold text-white block">
+                {trApp('ពាក្យសម្ងាត់៖', 'Password:')}
               </label>
               <div className="relative flex items-center">
-                <span className="absolute left-3.5 text-white">
-                  <Lock className="w-4 h-4 text-white" />
-                </span>
+                <Lock className="w-4 h-4 text-white/90 absolute left-3" />
                 <input 
                   type={showPassword ? "text" : "password"}
                   required
-                  placeholder={trApp('ពាក្យសម្ងាត់', 'Password')}
-                  className="w-full pl-10 pr-11 py-3 bg-emerald-950/70 border-2 border-white/70 rounded-xl outline-none focus:border-white focus:ring-2 focus:ring-white/40 text-white text-sm font-bold transition-all shadow-inner placeholder:text-white/60 font-sans"
+                  placeholder="••••••"
+                  className="w-full pl-9 pr-10 py-2.5 bg-emerald-950/75 border border-white/70 rounded-xl outline-none focus:border-white focus:ring-2 focus:ring-white/30 text-white text-sm font-bold transition-all placeholder:text-white/50 font-sans"
                   value={loginPassword}
                   onChange={(e) => setLoginPassword(e.target.value)}
                 />
                 <button
                   type="button"
                   onClick={() => { playAudioFeedback('click'); setShowPassword(!showPassword); }}
-                  className="absolute right-3.5 text-white/80 hover:text-white transition-colors cursor-pointer"
+                  className="absolute right-3 text-white/80 hover:text-white transition-colors cursor-pointer"
                 >
                   {showPassword ? <Eye className="w-4 h-4" /> : <Eye className="w-4 h-4 opacity-70" />}
                 </button>
               </div>
             </div>
 
-            {/* Checkbox Remember Me & Forgot Password link row */}
-            <div className="flex justify-between items-center text-xs font-sans">
-              <label className="flex items-center gap-2 cursor-pointer text-white font-bold select-none">
+            {/* Compact Remember Me & Forgot Password */}
+            <div className="flex justify-between items-center text-xs font-sans pt-0.5">
+              <label className="flex items-center gap-1.5 cursor-pointer text-white font-bold select-none">
                 <input 
                   type="checkbox"
                   checked={rememberMe}
                   onChange={(e) => { playAudioFeedback('click'); setRememberMe(e.target.checked); }}
-                  className="rounded border-white text-emerald-500 focus:ring-white h-4 w-4 cursor-pointer accent-emerald-500"
+                  className="rounded border-white text-emerald-500 focus:ring-white h-3.5 w-3.5 cursor-pointer accent-emerald-500"
                 />
                 <span>{trApp('ចងចាំខ្ញុំ', 'Remember me')}</span>
               </label>
@@ -3243,45 +3512,22 @@ export default function App() {
                     )
                   );
                 }}
-                className="text-white hover:underline font-bold transition-all text-right cursor-pointer"
+                className="text-white/90 hover:text-white hover:underline font-bold transition-all cursor-pointer"
               >
                 {trApp('ភ្លេចពាក្យសម្ងាត់?', 'Forgot password?')}
               </button>
             </div>
 
-            {/* Subtle guide with fast demo fill for Admin or Manager (Nguon Sopheak) */}
-            <div className="flex items-center justify-between text-[11px] text-white bg-emerald-950/60 border border-emerald-400/40 rounded-xl px-3 py-2 font-sans">
-              <span>
-                💡 {loginTab === 'admin' ? 'Owner HSN: admin / ••••••' : 'Nguon Sopheak: sopheak / sopheak168'}
-              </span>
-              <button
-                type="button"
-                onClick={() => {
-                  playAudioFeedback('click');
-                  if (loginTab === 'admin') {
-                    setLoginUsername('admin');
-                    setLoginPassword('123456');
-                  } else {
-                    setLoginUsername('sopheak');
-                    setLoginPassword('sopheak168');
-                  }
-                }}
-                className="text-white font-extrabold underline cursor-pointer shrink-0 ml-2"
-              >
-                {trApp('បំពេញស្វ័យប្រវត្តិ', 'Auto-fill')}
-              </button>
-            </div>
-
-            {/* Main Green Admin / Manager Submit Button with White Text */}
+            {/* Submit Button */}
             <button
               type="submit"
-              className="w-full bg-gradient-to-r from-emerald-500 to-green-600 hover:from-emerald-400 hover:to-green-500 active:scale-[0.99] text-white font-black text-sm py-3.5 px-6 rounded-xl shadow-lg transition-all duration-200 flex items-center justify-center gap-2 cursor-pointer uppercase tracking-wider font-sans mt-1 border-2 border-white/70"
+              className="w-full bg-gradient-to-r from-emerald-500 to-green-600 hover:from-emerald-400 hover:to-green-500 active:scale-[0.99] text-white font-black text-xs sm:text-sm py-3 px-4 rounded-xl shadow-lg transition-all duration-200 flex items-center justify-center gap-2 cursor-pointer font-sans mt-0.5 border border-white/70"
             >
               {loginTab === 'admin' ? <Home className="w-4 h-4 text-white" /> : <Users className="w-4 h-4 text-white" />}
               <span>
                 {loginTab === 'admin'
-                  ? trApp('ចូលប្រព័ន្ធ • ម្ចាស់ផ្ទះ (ADMIN)', 'LOGIN • OWNER (ADMIN)')
-                  : trApp('ចូលប្រព័ន្ធ • អ្នកគ្រប់គ្រង (MANAGER)', 'LOGIN • MANAGER')}
+                  ? trApp('ចូលប្រព័ន្ធ • ម្ចាស់ផ្ទះ (Admin)', 'LOGIN • ADMIN')
+                  : trApp('ចូលប្រព័ន្ធ • អ្នកគ្រប់គ្រង (Manager)', 'LOGIN • MANAGER')}
               </span>
             </button>
           </form>
@@ -3479,53 +3725,57 @@ export default function App() {
                       </div>
                     </button>
 
-                    <button 
-                      type="button"
-                      onClick={() => { playAudioFeedback('click'); setShowTopActionsMenu(false); setIsExportInspectorOpen(true); }}
-                      className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-left text-xs font-normal text-emerald-200 hover:bg-emerald-800/50 transition-all cursor-pointer"
-                    >
-                      <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
-                      <div>
-                        <div>{trApp('នាំចេញវិក្កយបត្រ', 'Check & Export Invoice')}</div>
-                        <div className="text-[10px] font-normal text-emerald-300/70">
-                          {trApp('ពិនិត្យភាពពេញលេញ & នាំចេញ', 'Verify completeness & export')}
-                        </div>
-                      </div>
-                    </button>
+                    {staffRole !== 'manager' && (
+                      <>
+                        <button 
+                          type="button"
+                          onClick={() => { playAudioFeedback('click'); setShowTopActionsMenu(false); setIsExportInspectorOpen(true); }}
+                          className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-left text-xs font-normal text-emerald-200 hover:bg-emerald-800/50 transition-all cursor-pointer"
+                        >
+                          <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+                          <div>
+                            <div>{trApp('នាំចេញវិក្កយបត្រ', 'Check & Export Invoice')}</div>
+                            <div className="text-[10px] font-normal text-emerald-300/70">
+                              {trApp('ពិនិត្យភាពពេញលេញ & នាំចេញ', 'Verify completeness & export')}
+                            </div>
+                          </div>
+                        </button>
 
-                    <button
-                      type="button"
-                      onClick={() => {
-                        playAudioFeedback('click');
-                        setShowTopActionsMenu(false);
-                        setIsAdminPreviewing(true);
-                        setUserRole('tenant');
-                        setLoggedInTenantRoom(data.roomNo);
-                      }}
-                      className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-left text-xs font-normal text-purple-200 hover:bg-purple-900/40 transition-all cursor-pointer"
-                    >
-                      <Eye className="w-4 h-4 text-purple-400 shrink-0" />
-                      <div>
-                        <div>{trApp('មើលទិដ្ឋភាពភ្ញៀវជួល', 'Preview Tenant View')}</div>
-                        <div className="text-[10px] font-normal text-purple-300/70">
-                          {trApp('មើលទំព័រស្វ័យសេវាអតិថិជន', 'Preview tenant self-service portal')}
-                        </div>
-                      </div>
-                    </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            playAudioFeedback('click');
+                            setShowTopActionsMenu(false);
+                            setIsAdminPreviewing(true);
+                            setUserRole('tenant');
+                            setLoggedInTenantRoom(data.roomNo);
+                          }}
+                          className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-left text-xs font-normal text-purple-200 hover:bg-purple-900/40 transition-all cursor-pointer"
+                        >
+                          <Eye className="w-4 h-4 text-purple-400 shrink-0" />
+                          <div>
+                            <div>{trApp('មើលទិដ្ឋភាពភ្ញៀវជួល', 'Preview Tenant View')}</div>
+                            <div className="text-[10px] font-normal text-purple-300/70">
+                              {trApp('មើលទំព័រស្វ័យសេវាអតិថិជន', 'Preview tenant self-service portal')}
+                            </div>
+                          </div>
+                        </button>
 
-                    <button 
-                      type="button"
-                      onClick={() => { setShowTopActionsMenu(false); handleMarkAsPaid(); }}
-                      className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-left text-xs font-normal text-indigo-200 hover:bg-indigo-900/40 transition-all cursor-pointer"
-                    >
-                      <CreditCard className="w-4 h-4 text-indigo-400 shrink-0" />
-                      <div>
-                        <div>{trApp('កត់ត្រាបានបង់ប្រាក់រួច', 'Mark as Paid')}</div>
-                        <div className="text-[10px] font-normal text-indigo-300/70">
-                          {trApp('កត់ត្រាចូលតារាងចំណូលបូកបន្ត', 'Record payment into cumulative ledger')}
-                        </div>
-                      </div>
-                    </button>
+                        <button 
+                          type="button"
+                          onClick={() => { setShowTopActionsMenu(false); handleMarkAsPaid(); }}
+                          className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-left text-xs font-normal text-indigo-200 hover:bg-indigo-900/40 transition-all cursor-pointer"
+                        >
+                          <CreditCard className="w-4 h-4 text-indigo-400 shrink-0" />
+                          <div>
+                            <div>{trApp('កត់ត្រាបានបង់ប្រាក់រួច', 'Mark as Paid')}</div>
+                            <div className="text-[10px] font-normal text-indigo-300/70">
+                              {trApp('កត់ត្រាចូលតារាងចំណូលបូកបន្ត', 'Record payment into cumulative ledger')}
+                            </div>
+                          </div>
+                        </button>
+                      </>
+                    )}
 
                     <button 
                       type="button"
@@ -3547,88 +3797,90 @@ export default function App() {
                   </div>
                 )}
 
-                {/* PDF & DOWNLOAD ACTIONS GROUP */}
-                <div className="py-2 space-y-1">
-                  <div className="px-2 py-1 text-[10px] font-normal text-emerald-400/70 uppercase tracking-wider font-mono">
-                    📄 {trApp('ការនាំចេញ & បោះពុម្ព', 'Export & Print')}
-                  </div>
-
-                  {/* PDF Format Selector Submenu inside Dropdown */}
-                  <div className="bg-stone-900/80 rounded-xl p-1.5 border border-emerald-900/80 space-y-0.5">
-                    <div className="text-[10px] text-rose-300 font-normal px-2 py-1 flex items-center justify-between">
-                      <span className="flex items-center gap-1.5">
-                        <FileText className="w-3.5 h-3.5 text-rose-400" /> {trApp('នាំចេញ PDF', 'Export PDF')}
-                      </span>
+                {/* PDF & DOWNLOAD ACTIONS GROUP (Owner Only - Manager is not allowed to view or export Invoices) */}
+                {staffRole !== 'manager' && (
+                  <div className="py-2 space-y-1">
+                    <div className="px-2 py-1 text-[10px] font-normal text-emerald-400/70 uppercase tracking-wider font-mono">
+                      📄 {trApp('ការនាំចេញ & បោះពុម្ព', 'Export & Print')}
                     </div>
-                    <div className="grid grid-cols-2 gap-1 pt-0.5">
-                      <button
-                        type="button"
-                        onClick={() => { setShowTopActionsMenu(false); handleExportPdf('device'); }}
-                        className="flex items-center gap-1.5 p-1.5 rounded-lg bg-stone-800/80 hover:bg-emerald-800/80 text-stone-200 text-[11px] font-normal text-left cursor-pointer transition-colors"
-                      >
-                        <Smartphone className="w-3 h-3 text-blue-400 shrink-0" />
-                        <span>{trApp('ឧបករណ៍', 'Device')}</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => { setShowTopActionsMenu(false); handleExportPdf('mobile'); }}
-                        className="flex items-center gap-1.5 p-1.5 rounded-lg bg-stone-800/80 hover:bg-emerald-800/80 text-stone-200 text-[11px] font-normal text-left cursor-pointer transition-colors"
-                      >
-                        <Smartphone className="w-3 h-3 text-indigo-400 shrink-0" />
-                        <span>{trApp('ទូរស័ព្ទ', 'Mobile')}</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => { setShowTopActionsMenu(false); handleExportPdf('tablet'); }}
-                        className="flex items-center gap-1.5 p-1.5 rounded-lg bg-stone-800/80 hover:bg-emerald-800/80 text-stone-200 text-[11px] font-normal text-left cursor-pointer transition-colors"
-                      >
-                        <Tablet className="w-3 h-3 text-violet-400 shrink-0" />
-                        <span>Tablet (148mm)</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => { setShowTopActionsMenu(false); handleExportPdf('a4'); }}
-                        className="flex items-center gap-1.5 p-1.5 rounded-lg bg-stone-800/80 hover:bg-emerald-800/80 text-stone-200 text-[11px] font-normal text-left cursor-pointer transition-colors"
-                      >
-                        <FileText className="w-3 h-3 text-rose-400 shrink-0" />
-                        <span>A4 Standard</span>
-                      </button>
-                    </div>
-                  </div>
 
-                  <button 
-                    type="button"
-                    onClick={() => { setShowTopActionsMenu(false); handleTopDownload(); }}
-                    disabled={isDownloading}
-                    className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-left text-xs font-normal text-stone-200 hover:bg-sky-900/40 transition-all cursor-pointer disabled:opacity-50"
-                  >
-                    {isDownloading && !isExportingPdf ? (
-                      <Loader2 className="w-4 h-4 animate-spin text-sky-400 shrink-0" />
-                    ) : (
-                      <Download className="w-4 h-4 text-sky-400 shrink-0" />
-                    )}
-                    <div>
-                      <div>{trApp('ទាញយករូបភាព PNG', 'Download Image (PNG)')}</div>
-                      <div className="text-[10px] font-normal text-stone-400">
-                        {trApp('រក្សាទុកជារូបភាពច្បាស់ 4K', 'Save high-res PNG invoice')}
+                    {/* PDF Format Selector Submenu inside Dropdown */}
+                    <div className="bg-stone-900/80 rounded-xl p-1.5 border border-emerald-900/80 space-y-0.5">
+                      <div className="text-[10px] text-rose-300 font-normal px-2 py-1 flex items-center justify-between">
+                        <span className="flex items-center gap-1.5">
+                          <FileText className="w-3.5 h-3.5 text-rose-400" /> {trApp('នាំចេញ PDF', 'Export PDF')}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-1 pt-0.5">
+                        <button
+                          type="button"
+                          onClick={() => { setShowTopActionsMenu(false); handleExportPdf('device'); }}
+                          className="flex items-center gap-1.5 p-1.5 rounded-lg bg-stone-800/80 hover:bg-emerald-800/80 text-stone-200 text-[11px] font-normal text-left cursor-pointer transition-colors"
+                        >
+                          <Smartphone className="w-3 h-3 text-blue-400 shrink-0" />
+                          <span>{trApp('ឧបករណ៍', 'Device')}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { setShowTopActionsMenu(false); handleExportPdf('mobile'); }}
+                          className="flex items-center gap-1.5 p-1.5 rounded-lg bg-stone-800/80 hover:bg-emerald-800/80 text-stone-200 text-[11px] font-normal text-left cursor-pointer transition-colors"
+                        >
+                          <Smartphone className="w-3 h-3 text-indigo-400 shrink-0" />
+                          <span>{trApp('ទូរស័ព្ទ', 'Mobile')}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { setShowTopActionsMenu(false); handleExportPdf('tablet'); }}
+                          className="flex items-center gap-1.5 p-1.5 rounded-lg bg-stone-800/80 hover:bg-emerald-800/80 text-stone-200 text-[11px] font-normal text-left cursor-pointer transition-colors"
+                        >
+                          <Tablet className="w-3 h-3 text-violet-400 shrink-0" />
+                          <span>Tablet (148mm)</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { setShowTopActionsMenu(false); handleExportPdf('a4'); }}
+                          className="flex items-center gap-1.5 p-1.5 rounded-lg bg-stone-800/80 hover:bg-emerald-800/80 text-stone-200 text-[11px] font-normal text-left cursor-pointer transition-colors"
+                        >
+                          <FileText className="w-3 h-3 text-rose-400 shrink-0" />
+                          <span>A4 Standard</span>
+                        </button>
                       </div>
                     </div>
-                  </button>
 
-                  <button 
-                    type="button"
-                    onClick={() => { setShowTopActionsMenu(false); handlePrint(); }}
-                    className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-left text-xs font-normal text-stone-200 hover:bg-emerald-800/50 transition-all cursor-pointer"
-                  >
-                    <Printer className="w-4 h-4 text-emerald-400 shrink-0" />
-                    <div>
-                      <div>{trApp('បោះពុម្ពវិក្កយបត្រ', 'Print Invoice')}</div>
-                      <div className="text-[10px] font-normal text-stone-400">
-                        {trApp('បោះពុម្ពដោយផ្ទាល់', 'Print directly')}
+                    <button 
+                      type="button"
+                      onClick={() => { setShowTopActionsMenu(false); handleTopDownload(); }}
+                      disabled={isDownloading}
+                      className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-left text-xs font-normal text-stone-200 hover:bg-sky-900/40 transition-all cursor-pointer disabled:opacity-50"
+                    >
+                      {isDownloading && !isExportingPdf ? (
+                        <Loader2 className="w-4 h-4 animate-spin text-sky-400 shrink-0" />
+                      ) : (
+                        <Download className="w-4 h-4 text-sky-400 shrink-0" />
+                      )}
+                      <div>
+                        <div>{trApp('ទាញយករូបភាព PNG', 'Download Image (PNG)')}</div>
+                        <div className="text-[10px] font-normal text-stone-400">
+                          {trApp('រក្សាទុកជារូបភាពច្បាស់ 4K', 'Save high-res PNG invoice')}
+                        </div>
                       </div>
-                    </div>
-                  </button>
-                </div>
+                    </button>
+
+                    <button 
+                      type="button"
+                      onClick={() => { setShowTopActionsMenu(false); handlePrint(); }}
+                      className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-left text-xs font-normal text-stone-200 hover:bg-emerald-800/50 transition-all cursor-pointer"
+                    >
+                      <Printer className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <div>
+                        <div>{trApp('បោះពុម្ពវិក្កយបត្រ', 'Print Invoice')}</div>
+                        <div className="text-[10px] font-normal text-stone-400">
+                          {trApp('បោះពុម្ពដោយផ្ទាល់', 'Print directly')}
+                        </div>
+                      </div>
+                    </button>
+                  </div>
+                )}
 
                 {/* LINKS & LOGOUT SECTION */}
                 <div className="pt-2 space-y-1">
@@ -3694,12 +3946,12 @@ export default function App() {
                   {trApp('ផ្ទាំងគ្រប់គ្រង ងួន សុភ័ក្រ', 'Nguon Sopheak Dashboard')}
                 </div>
                 <div className="text-[10px] opacity-90 font-sans">
-                  {trApp('កត់ត្រាទឹក-ភ្លើង & ភ្ញៀវជួល', 'Meters & Tenant Portal')}
+                  {trApp('បញ្ចូលភ្ញៀវថ្មី • កែភ្ញៀវចាស់ • កត់ទឹកភ្លើង', 'New Tenant • Edit Tenant • Meters')}
                 </div>
               </div>
             </button>
 
-            {/* Quick-Access Button for Shared Management & Permissions (Owner HSN) */}
+            {/* Quick-Access Button for Shared Management & Permissions (Owner HSN Only) */}
             {staffRole === 'admin' && (
               <button
                 type="button"
@@ -3744,10 +3996,10 @@ export default function App() {
                 <Plus className="w-4 h-4 shrink-0" />
                 <div className="text-left leading-tight">
                   <div className="font-bold">
-                    {trApp('ចុះឈ្មោះភ្ញៀវចូលបន្ទប់ទំនេរ', 'Vacant Room Check-In')}
+                    {trApp('បញ្ចូលភ្ញៀវថ្មី (បន្ទប់ទំនេរ)', 'Enter New Tenant')}
                   </div>
                   <div className="text-[10px] opacity-90 font-sans">
-                    {trApp('ប្តូរភ្ញៀវថ្មី & រក្សាចំណូលបូកបន្ត', 'New Tenant & Keep Revenue')}
+                    {trApp('ចុះឈ្មោះភ្ញៀវថ្មីចូលបន្ទប់', 'Check-In New Tenant')}
                   </div>
                 </div>
               </div>
@@ -3783,17 +4035,17 @@ export default function App() {
                   {activeTab === 'sharedAccess' && <Key className="w-5 h-5 text-emerald-300 group-hover:text-emerald-950 shrink-0 transition-colors" />}
                   {activeTab === 'sopheakDashboard' && <Sparkles className="w-5 h-5 text-emerald-300 group-hover:text-emerald-950 shrink-0 transition-colors" />}
                   <span className="truncate font-bold text-base sm:text-lg">
-                    {activeTab === 'invoice' && trApp('១. វិក្កយបត្រថ្លៃជួលបន្ទប់', '1. Room Rental Invoice')}
-                    {activeTab === 'tenants' && trApp('២. បញ្ជីភ្ញៀវស្នាក់នៅ', '2. Tenant Directory')}
+                    {activeTab === 'invoice' && trApp('កត់ត្រាភ្លើង-ទឹក & វិក្កយបត្រ', 'Record Meters & Invoice')}
+                    {activeTab === 'tenants' && trApp('កែសម្រួលភ្ញៀវចាស់', 'Edit Existing Tenants')}
                     {activeTab === 'manualForm' && trApp('៣. បញ្ចូលទិន្នន័យទឹក-ភ្លើង', '3. Enter Utility Readings')}
                     {activeTab === 'reports' && trApp('៤. របាយការណ៍ចំណូលម្ចាស់ផ្ទះ', '4. Landlord Revenue Reports')}
                     {activeTab === 'summaryChecker' && trApp('៥. ពិនិត្យផលបូកសរុបភ្ញៀវ', '5. Total Summary Checker')}
                     {activeTab === 'tenantIds' && trApp('៦. គ្រប់គ្រង ID ភ្ញៀវស្នាក់នៅ', '6. Manage Tenant IDs')}
-                    {activeTab === 'checkInForm' && trApp('៧. ចុះឈ្មោះភ្ញៀវចូលបន្ទប់ទំនេរ', '7. Vacant Room Check-In')}
+                    {activeTab === 'checkInForm' && trApp('បញ្ចូលភ្ញៀវថ្មី (បន្ទប់ទំនេរ)', 'Enter New Tenant')}
                     {activeTab === 'managerOverview' && trApp('៨. អ្នកគ្រប់គ្រង', '8. Manager Overview')}
                     {activeTab === 'managerList' && trApp('៩. បញ្ជីអ្នកគ្រប់គ្រង', '9. Manager List')}
                     {activeTab === 'sharedAccess' && trApp('១០. ចែករំលែកសិទ្ធិ', '10. Shared Access')}
-                    {activeTab === 'sopheakDashboard' && trApp('១១. ផ្ទាំងគ្រប់គ្រង ងួន សុភ័ក្រ', '11. Nguon Sopheak Dashboard')}
+                    {activeTab === 'sopheakDashboard' && trApp('ផ្ទាំងគ្រប់គ្រង ងួន សុភ័ក្រ', 'Nguon Sopheak Dashboard')}
                   </span>
                 </div>
                 <div className="flex items-center gap-1.5 shrink-0 pl-2">
@@ -3814,24 +4066,33 @@ export default function App() {
                   <div className="absolute right-0 top-full mt-2 w-full bg-stone-900 border-2 border-emerald-600/90 rounded-2xl shadow-2xl z-50 p-2 overflow-hidden animate-in fade-in slide-in-from-top-2 duration-150 divide-y divide-emerald-900/50 max-h-[80vh] overflow-y-auto">
                     <div className="px-3 py-2 bg-emerald-950 rounded-xl mb-1 text-center border border-emerald-800/60">
                       <p className="text-[11px] font-bold text-emerald-300 tracking-wider font-sans uppercase">
-                        📂 {trApp('ជ្រើសរើសផ្នែកប្រព័ន្ធ', 'Select System Module')}
+                        📂 {staffRole === 'manager'
+                          ? trApp('មុខងារអ្នកគ្រប់គ្រង (គ្មានសិទ្ធិមើលចំណូល)', 'Manager Functions (No Revenue Access)')
+                          : trApp('ជ្រើសរើសផ្នែកប្រព័ន្ធ', 'Select System Module')}
                       </p>
                     </div>
 
                     <div className="space-y-1 pt-1">
-                      {[
-                        { id: 'invoice', label: trApp('១. វិក្កយបត្រថ្លៃជួលបន្ទប់', '1. Room Rental Invoice'), sub: trApp('បង្កើត និងបោះពុម្ពវិក្កយបត្រ', 'Invoice Generator & Print'), icon: FileText },
-                        { id: 'tenants', label: trApp('២. បញ្ជីភ្ញៀវស្នាក់នៅ', '2. Tenant Directory'), sub: trApp('បញ្ជីភ្ញៀវ និងលុបភ្ញៀវឈប់ជួលរក្សាចំណូល', 'Tenants & Vacate/Keep Revenue'), icon: Users },
-                        { id: 'manualForm', label: trApp('៣. បញ្ចូលទិន្នន័យទឹក-ភ្លើង', '3. Utility Readings Input'), sub: trApp('កត់ត្រាលេខកុងទ័រទឹក និងភ្លើង', 'Record Water & Electricity'), icon: Edit },
-                        { id: 'reports', label: trApp('៤. របាយការណ៍ចំណូលម្ចាស់ផ្ទះ', '4. Landlord Revenue Reports'), sub: trApp('តារាងចំណូលប្រចាំខែ និងបូកបន្ត', 'Monthly & Cumulative Revenue'), icon: BarChart3 },
-                        { id: 'summaryChecker', label: trApp('៥. ពិនិត្យផលបូកសរុបភ្ញៀវ', '5. Total Summary Checker'), sub: trApp('ពិនិត្យផលបូកសរុបប្រចាំឆ្នាំ', '12-Month Cumulative Statement'), icon: CheckCircle2 },
-                        { id: 'tenantIds', label: trApp('៦. គ្រប់គ្រង ID ភ្ញៀវស្នាក់នៅ', '6. Guest ID & Access PIN'), sub: trApp('លេខសម្គាល់ភ្ញៀវជួលបន្ទប់', 'Tenant Login Credentials'), icon: ShieldCheck },
-                        { id: 'checkInForm', label: trApp('៧. ចុះឈ្មោះភ្ញៀវចូលបន្ទប់ទំនេរ', '7. Vacant Room Check-In'), sub: trApp('បញ្ចូលភ្ញៀវថ្មីចូលបន្ទប់ទំនេរ (បូកបន្តចំណូល)', 'New Tenant Check-In (Keep Revenue)'), icon: Plus },
-                        { id: 'managerOverview', label: trApp('អ្នកគ្រប់គ្រង', 'Managers'), sub: trApp('គ្រប់គ្រងសិទ្ធិ និងកំណត់ហេតុត្រួតពិនិត្យ (HSN)', 'Manager Overview & Audit Log'), icon: Users },
-                        { id: 'managerList', label: trApp('បញ្ជីអ្នកគ្រប់គ្រង', 'Manager List'), sub: trApp('គណនី Nguon Sopheak និងអ្នកគ្រប់គ្រង', 'Nguon Sopheak & Manager Accounts'), icon: UserCheck },
-                        { id: 'sharedAccess', label: trApp('ចែករំលែកសិទ្ធិ', 'Shared Access'), sub: trApp('ផ្តល់សិទ្ធិបន្ទប់ និងចាក់សោតម្លៃ', 'Room Permissions & Price Lock'), icon: Key },
-                        { id: 'sopheakDashboard', label: trApp('ផ្ទាំងគ្រប់គ្រង ងួន សុភ័ក្រ', 'Nguon Sopheak Dashboard'), sub: trApp('ផ្ទាំងការងាររបស់អ្នកគ្រប់គ្រង Nguon Sopheak', 'Dedicated Portal for Nguon Sopheak'), icon: Sparkles },
-                      ].map((item) => {
+                      {(staffRole === 'manager'
+                        ? [
+                            { id: 'sopheakDashboard', label: trApp('១. ផ្ទាំងគ្រប់គ្រង ងួន សុភ័ក្រ', '1. Nguon Sopheak Dashboard'), sub: trApp('មើលលេខបន្ទប់ • បញ្ចូលភ្ញៀវថ្មី • កែ/លុបភ្ញៀវចាស់ • កត់ទឹកភ្លើង', 'Room Numbers • New Tenant • Edit/Delete Old Tenant • Meters'), icon: Sparkles },
+                            { id: 'checkInForm', label: trApp('២. បញ្ចូលភ្ញៀវជួលថ្មី', '2. Enter New Tenant'), sub: trApp('ចុះឈ្មោះភ្ញៀវថ្មីចូលបន្ទប់ទំនេរ', 'Register New Tenant to Vacant Room'), icon: Plus },
+                            { id: 'tenants', label: trApp('៣. បញ្ជីលេខបន្ទប់ភ្ញៀវជួល & លុបភ្ញៀវចាស់', '3. Tenant Room Numbers & Delete Old Tenant'), sub: trApp('មើលលេខបន្ទប់ កែសម្រួល និងលុបភ្ញៀវចាស់ (រក្សាចំណូលម្ចាស់ផ្ទះ)', 'View Room Numbers, Edit & Delete Old Tenant (Keep Revenue)'), icon: Users },
+                          ]
+                        : [
+                            { id: 'invoice', label: trApp('១. វិក្កយបត្រថ្លៃជួលបន្ទប់', '1. Room Rental Invoice'), sub: trApp('បង្កើត និងបោះពុម្ពវិក្កយបត្រ', 'Invoice Generator & Print'), icon: FileText },
+                            { id: 'tenants', label: trApp('២. បញ្ជីភ្ញៀវស្នាក់នៅ', '2. Tenant Directory'), sub: trApp('បញ្ជីភ្ញៀវ និងលុបភ្ញៀវឈប់ជួលរក្សាចំណូល', 'Tenants & Vacate/Keep Revenue'), icon: Users },
+                            { id: 'manualForm', label: trApp('៣. បញ្ចូលទិន្នន័យទឹក-ភ្លើង', '3. Utility Readings Input'), sub: trApp('កត់ត្រាលេខកុងទ័រទឹក និងភ្លើង', 'Record Water & Electricity'), icon: Edit },
+                            { id: 'reports', label: trApp('៤. របាយការណ៍ចំណូលម្ចាស់ផ្ទះ', '4. Landlord Revenue Reports'), sub: trApp('តារាងចំណូលប្រចាំខែ និងបូកបន្ត', 'Monthly & Cumulative Revenue'), icon: BarChart3 },
+                            { id: 'summaryChecker', label: trApp('៥. ពិនិត្យផលបូកសរុបភ្ញៀវ', '5. Total Summary Checker'), sub: trApp('ពិនិត្យផលបូកសរុបប្រចាំឆ្នាំ', '12-Month Cumulative Statement'), icon: CheckCircle2 },
+                            { id: 'tenantIds', label: trApp('៦. គ្រប់គ្រង ID ភ្ញៀវស្នាក់នៅ', '6. Guest ID & Access PIN'), sub: trApp('លេខសម្គាល់ភ្ញៀវជួលបន្ទប់', 'Tenant Login Credentials'), icon: ShieldCheck },
+                            { id: 'checkInForm', label: trApp('៧. ចុះឈ្មោះភ្ញៀវចូលបន្ទប់ទំនេរ', '7. Vacant Room Check-In'), sub: trApp('បញ្ចូលភ្ញៀវថ្មីចូលបន្ទប់ទំនេរ (បូកបន្តចំណូល)', 'New Tenant Check-In (Keep Revenue)'), icon: Plus },
+                            { id: 'managerOverview', label: trApp('អ្នកគ្រប់គ្រង', 'Managers'), sub: trApp('គ្រប់គ្រងសិទ្ធិ និងកំណត់ហេតុត្រួតពិនិត្យ (HSN)', 'Manager Overview & Audit Log'), icon: Users },
+                            { id: 'managerList', label: trApp('បញ្ជីអ្នកគ្រប់គ្រង', 'Manager List'), sub: trApp('គណនី Nguon Sopheak និងអ្នកគ្រប់គ្រង', 'Nguon Sopheak & Manager Accounts'), icon: UserCheck },
+                            { id: 'sharedAccess', label: trApp('ចែករំលែកសិទ្ធិ', 'Shared Access'), sub: trApp('ផ្តល់សិទ្ធិបន្ទប់ និងចាក់សោតម្លៃ', 'Room Permissions & Price Lock'), icon: Key },
+                            { id: 'sopheakDashboard', label: trApp('ផ្ទាំងគ្រប់គ្រង ងួន សុភ័ក្រ', 'Nguon Sopheak Dashboard'), sub: trApp('ផ្ទាំងការងាររបស់អ្នកគ្រប់គ្រង Nguon Sopheak', 'Dedicated Portal for Nguon Sopheak'), icon: Sparkles },
+                          ]
+                      ).map((item) => {
                         const IconComp = item.icon;
                         const isActive = activeTab === item.id;
                         return (
@@ -3868,7 +4129,7 @@ export default function App() {
                             </div>
                             {isActive && (
                               <span className="text-xs bg-white text-emerald-900 group-hover:bg-emerald-950 group-hover:text-white px-2 py-0.5 rounded-full font-bold shadow-xs">
-                                ✓ ជ្រើសរើស
+                                ✓ {trApp('ជ្រើសរើស', 'Selected')}
                               </span>
                             )}
                           </button>
@@ -3878,6 +4139,55 @@ export default function App() {
                   </div>
                 </>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Live System Auto-Update Banner whenever a new tenant is added or an existing tenant is edited */}
+      {systemSyncNotice && (
+        <div className="max-w-7xl mx-auto mb-4 print:hidden relative z-50">
+          <div className="bg-emerald-950/95 border-2 border-emerald-400/70 rounded-2xl px-4 py-3 shadow-2xl flex flex-wrap items-center justify-between gap-3 backdrop-blur-md">
+            <div className="flex items-center gap-3">
+              <span className="w-3 h-3 rounded-full bg-emerald-400 animate-ping" />
+              <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
+              <div>
+                <p className="text-xs sm:text-sm font-black text-white">
+                  {trApp(
+                    'ប្រព័ន្ធបានធ្វើបច្ចុប្បន្នភាពទិន្នន័យភ្ញៀវដោយស្វ័យប្រវត្តិ!',
+                    'System Automatically Updated Tenant Information!'
+                  )}
+                </p>
+                <p className="text-[11px] font-bold text-emerald-200/90 mt-0.5">
+                  {trApp('បន្ទប់', 'Room')}: <span className="font-mono text-amber-300">{formatRoomBadge(systemSyncNotice.roomNo)}</span>
+                  {staffRole === 'owner' ? (
+                    <> • <span className="text-white">{systemSyncNotice.tenantName}</span></>
+                  ) : null}
+                  {' '}•{' '}
+                  <span className="text-emerald-300">
+                    {systemSyncNotice.action === 'new'
+                      ? trApp('បញ្ចូលភ្ញៀវថ្មី (បូកបន្តចំណូល)', 'New Tenant Added (Revenue Accumulated)')
+                      : systemSyncNotice.action === 'edit'
+                      ? trApp('កែប្រែព័ត៌មានភ្ញៀវចាស់', 'Existing Tenant Info Updated')
+                      : systemSyncNotice.action === 'vacate'
+                      ? trApp('លុបភ្ញៀវចាស់ រក្សាទុកចំណូលម្ចាស់ផ្ទះ', 'Vacated Tenant Cleared, Landlord Revenue Saved')
+                      : trApp('ធ្វើបច្ចុប្បន្នភាពលេខកុងទ័រទឹក-ភ្លើង', 'Utility Readings Updated')}
+                  </span>
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-mono font-bold text-emerald-300 bg-emerald-900/70 px-2.5 py-1 rounded-lg border border-emerald-500/40">
+                SYNCED • {systemSyncNotice.time}
+              </span>
+              <button
+                type="button"
+                onClick={() => setSystemSyncNotice(null)}
+                className="p-1.5 rounded-lg bg-emerald-900/60 hover:bg-emerald-800 text-emerald-200 transition-colors cursor-pointer"
+                title={trApp('បិទ', 'Close')}
+              >
+                <X className="w-4 h-4" />
+              </button>
             </div>
           </div>
         </div>
@@ -3911,7 +4221,7 @@ export default function App() {
             
             {/* Screen Inner Display Frame */}
             <div className="bg-stone-100 rounded-2xl overflow-hidden p-0.5 print:bg-white print:p-0 print:rounded-none">
-              {activeTab === 'invoice' && (
+              {activeTab === 'invoice' && staffRole !== 'manager' && (
                 <>
                   {/* TENANT SELF-SERVICE PORTAL OVERVIEW & KHQR PAYMENT (Shown when userRole === 'tenant') */}
                   {userRole === 'tenant' && (
@@ -7652,7 +7962,7 @@ export default function App() {
                   const isCurrent = data.roomNo === tenant.roomNo;
                   return (
                     <div 
-                      key={tenant.tenantName}
+                      key={`${tenant.roomNo}-${tenant.tenantName}`}
                       className={`p-5 rounded-xl border relative transition-all shadow-sm ${
                         isCurrent 
                           ? 'border-blue-500 bg-blue-50/10 shadow-blue-50/20' 
@@ -7665,55 +7975,69 @@ export default function App() {
                             {formatRoomBadge(tenant.roomNo)}
                           </span>
                           <div>
-                            <h4 className="font-moul text-sm text-blue-900 leading-normal">{tenant.tenantName}</h4>
+                            <h4 className="font-moul text-sm text-blue-900 leading-normal">
+                              {staffRole === 'manager'
+                                ? trApp(`បន្ទប់ភ្ញៀវជួល ${formatRoomBadge(tenant.roomNo)}`, `Tenant Room ${formatRoomBadge(tenant.roomNo)}`)
+                                : tenant.tenantName}
+                            </h4>
                             <div className="flex items-center gap-1.5 mt-0.5">
                               <span className="bg-emerald-100 text-emerald-800 text-[10px] font-bold px-2 py-0.5 rounded border border-emerald-300 font-mono">
-                                ID: {formatTenantId(tenant.roomNo)}
+                                {staffRole === 'manager'
+                                  ? trApp('មានភ្ញៀវជួល', 'Occupied')
+                                  : `ID: ${formatTenantId(tenant.roomNo)}`}
                               </span>
-                              <button
-                                type="button"
-                                onClick={() => handleCopyText(formatTenantId(tenant.roomNo), tenant.roomNo)}
-                                className="text-[10px] text-stone-500 hover:text-emerald-700 underline font-medium cursor-pointer"
-                              >
-                                {copiedTenantId === tenant.roomNo ? '✓ Copied' : 'ចម្លង ID (Copy ID)'}
-                              </button>
+                              {staffRole !== 'manager' && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleCopyText(formatTenantId(tenant.roomNo), tenant.roomNo)}
+                                  className="text-[10px] text-stone-500 hover:text-emerald-700 underline font-medium cursor-pointer"
+                                >
+                                  {copiedTenantId === tenant.roomNo ? '✓ Copied' : 'ចម្លង ID (Copy ID)'}
+                                </button>
+                              )}
                             </div>
                             <p className="text-[10px] text-stone-400 mt-0.5 font-sans">កាលបរិច្ឆេទចូល (Check-in): {tenant.checkInDate || '—'}</p>
                           </div>
                         </div>
 
-                        {/* Payment Pill */}
-                        <button
-                          type="button"
-                          onClick={() => handleTogglePaidStatus(tenant.roomNo)}
-                          className={`px-2.5 py-1 rounded-full text-xs font-bold border transition-all flex items-center gap-1.5 ${
-                            tenant.isPaid 
-                              ? 'bg-emerald-100 border-emerald-200 text-emerald-800' 
-                              : 'bg-amber-50 border-amber-100 text-amber-700 hover:bg-amber-100'
-                          }`}
-                        >
-                          <span className={`w-1.5 h-1.5 rounded-full ${tenant.isPaid ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
-                          {tenant.isPaid ? 'បានប្រមូល (Paid)' : 'មិនទាន់ប្រមូល (Unpaid)'}
-                        </button>
+                        {/* Payment Pill (Owner Only) */}
+                        {staffRole !== 'manager' && (
+                          <button
+                            type="button"
+                            onClick={() => handleTogglePaidStatus(tenant.roomNo)}
+                            className={`px-2.5 py-1 rounded-full text-xs font-bold border transition-all flex items-center gap-1.5 ${
+                              tenant.isPaid 
+                                ? 'bg-emerald-100 border-emerald-200 text-emerald-800' 
+                                : 'bg-amber-50 border-amber-100 text-amber-700 hover:bg-amber-100'
+                            }`}
+                          >
+                            <span className={`w-1.5 h-1.5 rounded-full ${tenant.isPaid ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
+                            {tenant.isPaid ? 'បានប្រមូល (Paid)' : 'មិនទាន់ប្រមូល (Unpaid)'}
+                          </button>
+                        )}
                       </div>
 
                       <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 mt-4 text-xs text-stone-600 border-t border-stone-100 pt-3 font-sans">
-                        <p>ថ្លៃបន្ទប់ (Room Price): <span className="font-bold text-stone-800">${tenant.roomPrice}</span></p>
-                        <p>វ៉ាយហ្វាយ (Wi-Fi): <span className="font-bold text-stone-800">${tenant.wifiPrice}</span></p>
+                        {staffRole !== 'manager' && (
+                          <>
+                            <p>ថ្លៃបន្ទប់ (Room Price): <span className="font-bold text-stone-800">${tenant.roomPrice}</span></p>
+                            <p>វ៉ាយហ្វាយ (Wi-Fi): <span className="font-bold text-stone-800">${tenant.wifiPrice}</span></p>
+                          </>
+                        )}
                         <p>ភ្លើងចាស់ (Old Elec): <span className="font-bold text-stone-800">{tenant.elecOld || '0'} KWH</span></p>
                         <p>ទឹកចាស់ (Old Water): <span className="font-bold text-stone-800">{tenant.waterOld || '0'} M³</span></p>
-                        {tenant.deposit !== undefined && (
+                        {staffRole !== 'manager' && tenant.deposit !== undefined && (
                           <p className="col-span-2 text-stone-700 font-medium">
                             ប្រាក់កក់ (Deposit): <span className="font-extrabold text-amber-700 font-mono">${tenant.deposit}</span>
                           </p>
                         )}
-                        {tenant.tenantPhone && (
+                        {staffRole !== 'manager' && tenant.tenantPhone && (
                           <p className="col-span-2 text-stone-500 flex items-center gap-1 mt-1 text-[11px]">
                             <span>📞 លេខទូរស័ព្ទ (Phone):</span>
                             <span className="font-bold text-stone-700">{tenant.tenantPhone}</span>
                           </p>
                         )}
-                        {tenant.tenantIdNo && (
+                        {staffRole !== 'manager' && tenant.tenantIdNo && (
                           <p className="col-span-2 text-stone-500 flex items-center gap-1 text-[11px]">
                             <span>🪪 ID Card:</span>
                             <span className="font-medium text-stone-700">{tenant.tenantIdNo}</span>
@@ -7723,33 +8047,37 @@ export default function App() {
 
                       {/* Room Footer Action Buttons */}
                       <div className="flex gap-2 mt-4 pt-3 border-t border-stone-100 flex-wrap">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            handleSelectTenant(tenant);
-                            setActiveTab('invoice');
-                          }}
-                          className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold py-1.5 px-3 rounded-lg text-xs transition-colors shadow-sm flex items-center justify-center gap-1 cursor-pointer"
-                        >
-                          <CreditCard className="w-3.5 h-3.5" />
-                          បង្កើតវិក្កយបត្រ (Use Tenant)
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            handleSelectTenant(tenant);
-                            setUserRole('tenant');
-                            setLoggedInTenantRoom(tenant.roomNo);
-                            sessionStorage.setItem('userRole', 'tenant');
-                            sessionStorage.setItem('loggedInTenantRoom', tenant.roomNo);
-                            playAudioFeedback('success');
-                          }}
-                          className="bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 font-bold py-1.5 px-2.5 rounded-lg text-xs transition-all flex items-center justify-center gap-1 cursor-pointer"
-                          title="Preview Self-Service Tenant Portal for this Room"
-                        >
-                          <Eye className="w-3.5 h-3.5 text-emerald-700" />
-                          <span>ច្រកទ្វារភ្ញៀវ / Tenant Portal</span>
-                        </button>
+                        {staffRole !== 'manager' && (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                handleSelectTenant(tenant);
+                                setActiveTab('invoice');
+                              }}
+                              className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold py-1.5 px-3 rounded-lg text-xs transition-colors shadow-sm flex items-center justify-center gap-1 cursor-pointer"
+                            >
+                              <CreditCard className="w-3.5 h-3.5" />
+                              បង្កើតវិក្កយបត្រ (Use Tenant)
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                handleSelectTenant(tenant);
+                                setUserRole('tenant');
+                                setLoggedInTenantRoom(tenant.roomNo);
+                                sessionStorage.setItem('userRole', 'tenant');
+                                sessionStorage.setItem('loggedInTenantRoom', tenant.roomNo);
+                                playAudioFeedback('success');
+                              }}
+                              className="bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 font-bold py-1.5 px-2.5 rounded-lg text-xs transition-all flex items-center justify-center gap-1 cursor-pointer"
+                              title="Preview Self-Service Tenant Portal for this Room"
+                            >
+                              <Eye className="w-3.5 h-3.5 text-emerald-700" />
+                              <span>ច្រកទ្វារភ្ញៀវ / Tenant Portal</span>
+                            </button>
+                          </>
+                        )}
                         <button
                           type="button"
                           onClick={() => {
@@ -7764,22 +8092,14 @@ export default function App() {
                         <button
                           type="button"
                           onClick={() => handleVacateRoom(tenant)}
-                          className="bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 font-bold py-1.5 px-2.5 rounded-lg text-xs transition-all flex items-center justify-center gap-1 cursor-pointer"
+                          className="bg-red-600 hover:bg-red-700 text-white font-bold py-1.5 px-3 rounded-lg text-xs transition-all flex items-center justify-center gap-1 cursor-pointer shadow-xs"
                           title={trApp(
-                            'លុបព័ត៌មានភ្ញៀវចាស់ដែលឈប់ជួល តែរក្សាទុកចំណូលបូកបន្តឱ្យម្ចាស់ផ្ទះ',
-                            'Clear vacated tenant info while keeping cumulative revenue for the landlord'
+                            'លុបភ្ញៀវចាស់ចេញពីបន្ទប់ តែរក្សាទុកចំណូលបូកបន្តឱ្យម្ចាស់ផ្ទះ',
+                            'Delete old tenant while keeping cumulative revenue for the landlord'
                           )}
                         >
-                          <Trash2 className="w-3.5 h-3.5 text-amber-700" />
-                          <span>{trApp('ភ្ញៀវឈប់ជួល (រក្សាចំណូល)', 'Vacate (Keep Revenue)')}</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteTenant(tenant.tenantName)}
-                          className="bg-red-50 hover:bg-red-100 text-red-600 font-bold py-1.5 px-2.5 rounded-lg text-xs transition-all flex items-center justify-center gap-1 cursor-pointer"
-                          title={trApp('លុបភ្ញៀវចាស់ (រក្សាចំណូលបូកបន្ត)', 'Delete former tenant (Preserve revenue)')}
-                        >
                           <Trash2 className="w-3.5 h-3.5" />
+                          <span>{trApp('លុបភ្ញៀវចាស់ (រក្សាចំណូលបូកបន្ត)', 'Delete Old Tenant (Keep Revenue)')}</span>
                         </button>
                       </div>
                     </div>
@@ -8515,14 +8835,16 @@ export default function App() {
                       </div>
                     </div>
                     <div className="flex flex-wrap items-center gap-2 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => setActiveTab('invoice')}
-                        className="bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs px-3.5 py-2 rounded-lg shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
-                      >
-                        <FileText className="w-4 h-4" />
-                        {trApp('មើលវិក្កយបត្រ', 'View Invoice')} ({formatRoomBadge(checkInSuccessInfo.roomNo)})
-                      </button>
+                      {staffRole !== 'manager' && (
+                        <button
+                          type="button"
+                          onClick={() => setActiveTab('invoice')}
+                          className="bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs px-3.5 py-2 rounded-lg shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <FileText className="w-4 h-4" />
+                          {trApp('មើលវិក្កយបត្រ', 'View Invoice')} ({formatRoomBadge(checkInSuccessInfo.roomNo)})
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => setActiveTab('tenants')}
@@ -8567,16 +8889,7 @@ export default function App() {
                             if (isVacant) {
                               handleSelectVacantRoomForCheckIn(rNo, false);
                             } else if (occupiedTenant) {
-                              if (
-                                confirm(
-                                  trApp(
-                                    `បន្ទប់ ${formatRoomBadge(rNo)} បច្ចុប្បន្នមានភ្ញៀវ "${occupiedTenant.tenantName}" កំពុងជួល។\nតើអ្នកចង់ផ្ទេរបន្ទប់ ${formatRoomBadge(rNo)} ទៅជា «បន្ទប់ទំនេរ (រក្សាចំណូលបូកបន្ត)» ដើម្បីបញ្ចូលភ្ញៀវថ្មីមែនទេ?`,
-                                    `Room ${formatRoomBadge(rNo)} is currently occupied by "${occupiedTenant.tenantName}".\nDo you want to vacate ${formatRoomBadge(rNo)} (preserving cumulative revenue) to check in a new tenant?`
-                                  )
-                                )
-                              ) {
-                                handleVacateRoom(occupiedTenant);
-                              }
+                              handleVacateRoom(occupiedTenant);
                             }
                           }}
                           className={`p-2.5 rounded-xl border-2 text-left transition-all flex flex-col justify-between cursor-pointer ${
@@ -8611,11 +8924,15 @@ export default function App() {
                           <div className="mt-2">
                             {isVacant ? (
                               <div className={`text-[10px] font-bold truncate ${isSelected ? 'text-emerald-100' : 'text-emerald-800'}`}>
-                                ${meta?.roomPrice || '80'}/{trApp('ខែ', 'mo')}
+                                {staffRole === 'manager'
+                                  ? trApp('រួចរាល់ជួល', 'Ready')
+                                  : `$${meta?.roomPrice || '80'}/${trApp('ខែ', 'mo')}`}
                               </div>
                             ) : (
-                              <div className="text-[10px] font-bold text-stone-700 truncate" title={occupiedTenant?.tenantName}>
-                                👤 {occupiedTenant?.tenantName}
+                              <div className="text-[10px] font-bold text-stone-700 truncate">
+                                {staffRole === 'manager'
+                                  ? `🏠 ${formatRoomBadge(rNo)}`
+                                  : `👤 ${occupiedTenant?.tenantName}`}
                               </div>
                             )}
                           </div>
@@ -9010,6 +9327,13 @@ export default function App() {
               playAudioFeedback={playAudioFeedback}
               lang={appLang}
               setLang={setAppLang}
+              onSystemTenantUpdated={(info) => {
+                triggerSystemSyncNotice(info);
+                const cleanRoom = normalizeRoomKey(info.roomNo);
+                if (cleanRoom && normalizeRoomKey(inputRoomNo) === cleanRoom && info.action !== 'vacate') {
+                  setInputTenantName(info.tenantName);
+                }
+              }}
             />
           )}
             </div> {/* Screen Inner Display Frame */}
@@ -9288,7 +9612,7 @@ export default function App() {
                   const isCurrent = data.roomNo === tenant.roomNo;
                   return (
                     <div 
-                      key={tenant.tenantName}
+                      key={`${tenant.roomNo}-${tenant.tenantName}`}
                       onClick={() => handleSelectTenant(tenant)}
                       className={`group relative p-3 rounded-lg border text-left cursor-pointer transition-all duration-200 hover:scale-[1.03] active:scale-[0.98] ${
                         isCurrent 
@@ -9302,38 +9626,48 @@ export default function App() {
                             <span className="text-emerald-600 bg-emerald-50 border border-emerald-100 px-1.5 py-0.5 rounded text-xs font-black font-sans">
                               {formatRoomBadge(tenant.roomNo)}
                             </span>
-                            <span className="font-moul text-xs text-blue-900">{tenant.tenantName}</span>
+                            <span className="font-moul text-xs text-blue-900">
+                              {staffRole === 'manager'
+                                ? trApp(`បន្ទប់ភ្ញៀវជួល ${formatRoomBadge(tenant.roomNo)}`, `Tenant Room ${formatRoomBadge(tenant.roomNo)}`)
+                                : tenant.tenantName}
+                            </span>
                           </span>
                           
-                          {/* Paid/Unpaid quick toggle button */}
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleTogglePaidStatus(tenant.roomNo);
-                            }}
-                            className={`px-2 py-0.5 rounded text-[10px] font-bold border transition-all flex items-center gap-1 ${
-                              tenant.isPaid 
-                                ? 'bg-emerald-100 border-emerald-200 text-emerald-800' 
-                                : 'bg-red-50 border-red-100 text-red-700 hover:bg-red-100'
-                            }`}
-                            title="ចុចដើម្បីកត់ត្រាការទូទាត់រហ័សសម្រាប់ខែតុលា / Click to quick toggle October payment status"
-                          >
-                            <span className={`w-1 h-1 rounded-full ${tenant.isPaid ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
-                            {tenant.isPaid ? 'បានបង់ (Paid)' : 'មិនទាន់បង់ (Unpaid)'}
-                          </button>
+                          {/* Paid/Unpaid quick toggle button (Owner Only) */}
+                          {staffRole !== 'manager' && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleTogglePaidStatus(tenant.roomNo);
+                              }}
+                              className={`px-2 py-0.5 rounded text-[10px] font-bold border transition-all flex items-center gap-1 ${
+                                tenant.isPaid 
+                                  ? 'bg-emerald-100 border-emerald-200 text-emerald-800' 
+                                  : 'bg-red-50 border-red-100 text-red-700 hover:bg-red-100'
+                              }`}
+                              title="ចុចដើម្បីកត់ត្រាការទូទាត់រហ័ស / Click to quick toggle payment status"
+                            >
+                              <span className={`w-1 h-1 rounded-full ${tenant.isPaid ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
+                              {tenant.isPaid ? 'បានបង់ (Paid)' : 'មិនទាន់បង់ (Unpaid)'}
+                            </button>
+                          )}
                         </div>
                         <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 mt-2.5 text-[11px] text-stone-500 border-t border-stone-100/50 pt-2 font-sans">
-                          <p>តម្លៃជួល (Rent): <span className="font-bold text-stone-700">${tenant.roomPrice}</span></p>
-                          <p>Wifi: <span className="font-bold text-stone-700">${tenant.wifiPrice}</span></p>
+                          {staffRole !== 'manager' && (
+                            <>
+                              <p>តម្លៃជួល (Rent): <span className="font-bold text-stone-700">${tenant.roomPrice}</span></p>
+                              <p>Wifi: <span className="font-bold text-stone-700">${tenant.wifiPrice}</span></p>
+                            </>
+                          )}
                           <p>ភ្លើងចាស់ (Elec): <span className="font-bold text-stone-700">{tenant.elecOld || '0'}</span></p>
                           <p>ទឹកចាស់ (Water): <span className="font-bold text-stone-700">{tenant.waterOld || '0'}</span></p>
-                          {tenant.deposit !== undefined && (
+                          {staffRole !== 'manager' && tenant.deposit !== undefined && (
                             <p className="col-span-2 text-stone-600 font-medium mt-1">ប្រាក់កក់ (Deposit): <span className="font-extrabold text-amber-700 font-mono">${tenant.deposit}</span> <span className="text-[9px] text-stone-400 font-normal font-sans">(display only)</span></p>
                           )}
                         </div>
                         <p className="text-[10px] text-stone-400 mt-1 font-sans">ថ្ងៃចូលស្នាក់នៅ (Check-in): {tenant.checkInDate || 'មិនទាន់បញ្ចូលទេ / Not specified'}</p>
-                        {isCurrent && (
+                        {isCurrent && staffRole !== 'manager' && (
                           <button
                             type="button"
                             onClick={(e) => {
@@ -9356,8 +9690,8 @@ export default function App() {
                         )}
                       </div>
 
-                      {/* Edit and Vacate (Keep Cumulative Revenue) Actions on Hover */}
-                      <div className="absolute right-2 top-1/2 -translate-y-1/2 flex flex-col gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      {/* Edit and Delete Old Tenant (Keep Cumulative Revenue) Actions */}
+                      <div className="absolute right-2 top-1/2 -translate-y-1/2 flex flex-col gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
                         <button
                           type="button"
                           onClick={(e) => {
@@ -9365,7 +9699,7 @@ export default function App() {
                             handleStartEditTenant(tenant);
                           }}
                           className="p-1 text-stone-400 hover:text-emerald-600 hover:bg-emerald-50 rounded transition-all"
-                          title={trApp('កែសម្រួល ឬប្តូរភ្ញៀវថ្មី (រក្សាចំណូលបូកបន្ត)', 'Edit or Replace Tenant (Keep Cumulative Revenue)')}
+                          title={trApp('កែសម្រួលបន្ទប់', 'Edit Room')}
                         >
                           <Edit className="w-3.5 h-3.5" />
                         </button>
@@ -9376,7 +9710,7 @@ export default function App() {
                             handleVacateRoom(tenant);
                           }}
                           className="p-1 text-stone-400 hover:text-red-500 hover:bg-red-50 rounded transition-all"
-                          title={trApp('លុបភ្ញៀវឈប់ជួល (រក្សាទុកចំណូលបូកបន្ត)', 'Clear Vacated Tenant (Keep Cumulative Revenue)')}
+                          title={trApp('លុបភ្ញៀវចាស់ (រក្សាទុកចំណូលម្ចាស់ផ្ទះបូកបន្ត)', 'Delete Old Tenant (Keep Landlord Cumulative Revenue)')}
                         >
                           <UserMinus className="w-3.5 h-3.5" />
                         </button>

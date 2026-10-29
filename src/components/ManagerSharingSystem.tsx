@@ -263,6 +263,11 @@ interface ManagerSharingProps {
   setLang?: React.Dispatch<React.SetStateAction<'km' | 'en'>>;
   elecRateRiel?: number;
   waterRateRiel?: number;
+  onSystemTenantUpdated?: (info: {
+    roomNo: string;
+    tenantName: string;
+    action: 'new' | 'edit' | 'vacate' | 'utility';
+  }) => void;
 }
 
 export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
@@ -286,7 +291,8 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
   lang: propLang,
   setLang: propSetLang,
   elecRateRiel = 1500,
-  waterRateRiel = 2000
+  waterRateRiel = 2000,
+  onSystemTenantUpdated
 }) => {
   // Determine effective role ('owner' vs 'manager')
   const resolvedRole: 'owner' | 'manager' =
@@ -372,12 +378,15 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
     tenantName: '',
     tenantIdNo: '',
     tenantPhone: '',
-    checkInDate: '',
+    checkInDate: new Date().toISOString().split('T')[0],
     roomPrice: 80,
     wifiPrice: 0,
     deposit: 80,
+    elecOld: '0',
+    waterOld: '0',
     notes: ''
   });
+  const [lastSystemAutoSync, setLastSystemAutoSync] = useState<string>('');
 
   // Monthly Meter Entry State (Electricity & Water)
   const [meterRoomNo, setMeterRoomNo] = useState<string>('5');
@@ -486,22 +495,142 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
     }
   }, [newTenantForm.roomNo, savedTenants, vacantRoomsMeta]);
 
-  // Auto-load tenant when editingRoomNo changes in Current Tenants tab
+  // Auto-load tenant or vacant room defaults when editingRoomNo changes in Current Tenants tab
   useEffect(() => {
-    const found = savedTenants.find(t => normalizeRoom(t.roomNo) === normalizeRoom(editingRoomNo));
+    const cleanR = normalizeRoom(editingRoomNo);
+    const found = savedTenants.find(t => normalizeRoom(t.roomNo) === cleanR);
+    const meta = vacantRoomsMeta?.[cleanR];
     if (found) {
       setEditTenantForm({
         tenantName: found.tenantName || '',
         tenantIdNo: found.tenantIdNo || formatStableTenantId(found.roomNo),
         tenantPhone: found.tenantPhone || '',
-        checkInDate: found.checkInDate || '',
+        checkInDate: found.checkInDate || new Date().toISOString().split('T')[0],
         roomPrice: found.roomPrice || 80,
         wifiPrice: found.wifiPrice || 0,
         deposit: found.deposit || 0,
+        elecOld: String(found.elecOld ?? '0'),
+        waterOld: String(found.waterOld ?? '0'),
         notes: found.notes || ''
       });
+    } else {
+      setEditTenantForm({
+        tenantName: '',
+        tenantIdNo: formatStableTenantId(cleanR),
+        tenantPhone: '',
+        checkInDate: new Date().toISOString().split('T')[0],
+        roomPrice: meta?.roomPrice ?? 80,
+        wifiPrice: meta?.wifiPrice ?? 0,
+        deposit: meta?.deposit ?? 80,
+        elecOld: String(meta?.elecOld ?? '0'),
+        waterOld: String(meta?.waterOld ?? '0'),
+        notes: ''
+      });
     }
-  }, [editingRoomNo, savedTenants]);
+  }, [editingRoomNo]);
+
+  // Debounced Real-Time Auto-Update of System when Existing Tenant Info is Edited in editTenantForm
+  useEffect(() => {
+    if (sopheakTab !== 'currentTenants') return;
+    if (resolvedRole === 'manager' && !effectiveManager.permissions.canUpdateTenant) return;
+
+    const cleanR = normalizeRoom(editingRoomNo);
+    const existing = savedTenants.find(t => normalizeRoom(t.roomNo) === cleanR);
+    if (!existing) return; // For vacant rooms in edit tab, wait for explicit submit button
+
+    const newNameTrim = editTenantForm.tenantName.trim();
+    if (!newNameTrim) return;
+
+    const canEditPrice = resolvedRole === 'owner' || effectiveManager.permissions.canModifyPrices;
+    const finalRoomPrice = canEditPrice ? Number(editTenantForm.roomPrice) : existing.roomPrice;
+    const finalWifiPrice = canEditPrice ? Number(editTenantForm.wifiPrice) : existing.wifiPrice;
+    const finalDeposit = canEditPrice ? Number(editTenantForm.deposit) : existing.deposit || 0;
+    const stableId = formatStableTenantId(cleanR, editTenantForm.tenantIdNo || existing.tenantIdNo);
+    const cleanPhone = editTenantForm.tenantPhone.trim();
+    const cleanDate = editTenantForm.checkInDate || existing.checkInDate;
+    const cleanElecOld = String(editTenantForm.elecOld ?? existing.elecOld ?? '0').trim() || '0';
+    const cleanWaterOld = String(editTenantForm.waterOld ?? existing.waterOld ?? '0').trim() || '0';
+    const cleanNotes = editTenantForm.notes.trim();
+
+    const hasChanged =
+      existing.tenantName !== newNameTrim ||
+      (existing.tenantIdNo || '') !== stableId ||
+      (existing.tenantPhone || '') !== cleanPhone ||
+      (existing.checkInDate || '') !== cleanDate ||
+      Number(existing.roomPrice) !== finalRoomPrice ||
+      Number(existing.wifiPrice) !== finalWifiPrice ||
+      Number(existing.deposit || 0) !== finalDeposit ||
+      String(existing.elecOld || '0') !== cleanElecOld ||
+      String(existing.waterOld || '0') !== cleanWaterOld ||
+      (existing.notes || '') !== cleanNotes;
+
+    if (!hasChanged) return;
+
+    const timer = setTimeout(() => {
+      const nowIso = new Date().toISOString();
+      const actorLabel =
+        resolvedRole === 'owner'
+          ? 'HENG SAMNANG (Owner)'
+          : `${effectiveManager.fullName} (${effectiveManager.khmerName})`;
+
+      const updatedTenant: SharedTenantRecord = {
+        ...existing,
+        tenantName: newNameTrim,
+        tenantIdNo: stableId,
+        tenantPhone: cleanPhone,
+        checkInDate: cleanDate,
+        roomPrice: finalRoomPrice,
+        wifiPrice: finalWifiPrice,
+        deposit: finalDeposit,
+        elecOld: cleanElecOld,
+        waterOld: cleanWaterOld,
+        notes: cleanNotes,
+        updatedBy: actorLabel,
+        updatedAt: nowIso
+      };
+
+      setSavedTenants(prev => {
+        const updated = prev.map(t => (normalizeRoom(t.roomNo) === cleanR ? updatedTenant : t));
+        localStorage.setItem('savedTenants', JSON.stringify(updated));
+        return updated;
+      });
+
+      // Also synchronize active (non-archived) records for this room in history so tables & summaries update immediately
+      setHistory(prev => {
+        const updated = prev.map(rec => {
+          if (!rec.id.startsWith('h-archived-') && normalizeRoom(rec.roomNo) === cleanR) {
+            const newTotal =
+              finalRoomPrice +
+              finalWifiPrice +
+              (Number(rec.elecPrice) || 0) +
+              (Number(rec.waterPrice) || 0) +
+              (Number(rec.otherPrice) || 0);
+            return {
+              ...rec,
+              tenantName: newNameTrim,
+              tenantIdNo: stableId,
+              roomPrice: finalRoomPrice,
+              wifiPrice: finalWifiPrice,
+              totalUsd: Number(newTotal.toFixed(2))
+            };
+          }
+          return rec;
+        });
+        localStorage.setItem('invoice_history', JSON.stringify(updated));
+        return updated;
+      });
+
+      onSelectTenantForInvoice(updatedTenant);
+      setLastSystemAutoSync(new Date().toLocaleTimeString());
+      onSystemTenantUpdated?.({
+        roomNo: cleanR,
+        tenantName: newNameTrim,
+        action: 'edit'
+      });
+    }, 550);
+
+    return () => clearTimeout(timer);
+  }, [editTenantForm, editingRoomNo, sopheakTab]);
 
   // Auto-load previous meter readings when meterRoomNo or meterMonth changes
   useEffect(() => {
@@ -569,15 +698,16 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
     setHistory(prev => {
       let updated = [...prev];
 
-      // If the vacated tenant was marked paid for current month without a history record, preserve it
-      if (oldTenant && oldTenant.isPaid && cleanR) {
+      // Preserve the old tenant's current month revenue into history before deleting old tenant if not yet recorded
+      if (oldTenant && cleanR) {
         const currentYearMonth = new Date().toISOString().slice(0, 7);
+        const hasAnyRoomRecord = updated.some(r => normalizeRoom(r.roomNo) === cleanR);
         const hasCurrent = updated.some(
           r => normalizeRoom(r.roomNo) === cleanR && r.paymentDate.startsWith(currentYearMonth)
         );
-        if (!hasCurrent) {
+        if ((oldTenant.isPaid && !hasCurrent) || !hasAnyRoomRecord) {
           const preservedRec: SharedHistoryRecord = {
-            id: `h-preserved-${Date.now()}`,
+            id: `h-archived-${Date.now()}-RM${cleanR.padStart(2, '0')}`,
             roomNo: cleanR,
             tenantName: archiveLabel,
             paymentDate: `${currentYearMonth}-05`,
@@ -595,15 +725,19 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
         }
       }
 
-      // Keep 100% of past monthly revenue for this room while replacing the vacated tenant's personal name
+      // Keep 100% of past monthly revenue for this room and tag IDs as archived so new tenant records accumulate (cộng dồn) without overwriting
       updated = updated.map(rec => {
         const sameRoom = cleanR && normalizeRoom(rec.roomNo) === cleanR;
         const sameOldName =
           oldTenant?.tenantName &&
           rec.tenantName.trim().toLowerCase() === oldTenant.tenantName.trim().toLowerCase();
         if (sameRoom || sameOldName) {
+          const archivedId = rec.id.startsWith('h-archived-')
+            ? rec.id
+            : `h-archived-${rec.id}`;
           return {
             ...rec,
+            id: archivedId,
             roomNo: cleanR || rec.roomNo,
             tenantName: archiveLabel
           };
@@ -620,13 +754,6 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
   const handleVacateTenantKeepRevenue = (tenant: SharedTenantRecord) => {
     const cleanR = normalizeRoom(tenant.roomNo);
     const cumRev = roomCumulativeRevenueMap[cleanR] || 0;
-
-    const confirmMsg =
-      lang === 'km'
-        ? `តើអ្នកចង់លុបព័ត៌មានភ្ញៀវឈប់ជួល "${tenant.tenantName}" ចេញពីបន្ទប់ ${formatRoomCode(cleanR)} ប៉ុន្តែរក្សាទុកទិន្នន័យចំណូលគ្រប់ខែ ($${cumRev.toFixed(2)}) ដើម្បីបូកបន្តពេលមានភ្ញៀវថ្មីចូលជួលមែនទេ?`
-        : `Do you want to remove vacated tenant "${tenant.tenantName}" from room ${formatRoomCode(cleanR)} while preserving 100% of past monthly revenue ($${cumRev.toFixed(2)}) to continue accumulating when a new tenant moves in?`;
-
-    if (!window.confirm(confirmMsg)) return;
 
     playAudioFeedback?.('delete');
 
@@ -680,13 +807,19 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
       valueBefore: `ភ្ញៀវចាស់: ${tenant.tenantName}`,
       valueAfter: `បន្ទប់ទំនេរ (ចំណូលសរុប $${cumRev.toFixed(2)} រក្សាទុកបូកបន្ត)`,
       status: 'SYNCED',
-      notes: 'លុបព័ត៌មានភ្ញៀវឈប់ជួល ប៉ុន្តែរក្សាទុកចំណូលគ្រប់ខែរបស់ម្ចាស់ផ្ទះដើម្បីបូកបន្ត / Cleared vacated tenant, kept cumulative revenue'
+      notes: 'លុបព័ត៌មានភ្ញៀវចាស់ ប៉ុន្តែរក្សាទុកចំណូលគ្រប់ខែរបស់ម្ចាស់ផ្ទះដើម្បីបូកបន្ត / Deleted old tenant, kept cumulative landlord revenue'
+    });
+
+    onSystemTenantUpdated?.({
+      roomNo: cleanR,
+      tenantName: tenant.tenantName,
+      action: 'vacate'
     });
 
     showNotice(
       'success',
-      `✅ បានលុបព័ត៌មានភ្ញៀវឈប់ជួល "${tenant.tenantName}" ចេញពីបន្ទប់ ${formatRoomCode(cleanR)} រួចរាល់! ទិន្នន័យចំណូលខែមុនៗទាំងអស់ ($${cumRev.toFixed(2)}) ត្រូវបានរក្សាទុក និងបូកបន្តសម្រាប់ម្ចាស់ផ្ទះ។`,
-      `Cleared vacated tenant "${tenant.tenantName}" from ${formatRoomCode(cleanR)}. All previous monthly revenues ($${cumRev.toFixed(2)}) are preserved and will continue accumulating when a new tenant moves in.`
+      `✅ ប្រព័ន្ធបានធ្វើបច្ចុប្បន្នភាព៖ បានលុបព័ត៌មានភ្ញៀវចាស់ចេញពីបន្ទប់ ${formatRoomCode(cleanR)} ហើយចំណូលរបស់ម្ចាស់ផ្ទះត្រូវបានរក្សាទុកបូកបន្ត!`,
+      `System Updated: Deleted old tenant from ${formatRoomCode(cleanR)}. Landlord revenue is preserved and will accumulate when a new tenant moves in.`
     );
   };
 
@@ -749,22 +882,6 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
     // Check if room is currently occupied
     const existingActive = savedTenants.find(t => normalizeRoom(t.roomNo) === cleanR);
     if (existingActive) {
-      if (!newTenantForm.replaceExistingKeepRevenue) {
-        showNotice(
-          'error',
-          `⚠️ បន្ទប់ ${formatRoomCode(cleanR)} មានភ្ញៀវកំពុងជួលរួចហើយ (${existingActive.tenantName})! សូមធីកជម្រើស "ប្តូរភ្ញៀវថ្មី & រក្សាចំណូលបូកបន្ត" ប្រសិនបើភ្ញៀវចាស់បានឈប់ជួល។`,
-          `Room ${formatRoomCode(cleanR)} is currently occupied by ${existingActive.tenantName}! Check "Replace vacated tenant & keep cumulative revenue" if the old tenant moved out.`
-        );
-        return;
-      }
-
-      const confirmReplace = window.confirm(
-        lang === 'km'
-          ? `បន្ទប់ ${formatRoomCode(cleanR)} មានភ្ញៀវចាស់ឈ្មោះ "${existingActive.tenantName}"។ តើអ្នកចង់លុបឈ្មោះភ្ញៀវចាស់ដែលឈប់ជួល ហើយប្តូរដាក់ភ្ញៀវថ្មី "${nameTrim}" (ទិន្នន័យចំណូលខែមុនៗទាំងអស់នៅតែរក្សាទុក និងបូកបន្តក្នុងតារាងម្ចាស់ផ្ទះ) មែនទេ?`
-          : `Room ${formatRoomCode(cleanR)} currently has tenant "${existingActive.tenantName}". Do you want to clear the vacated tenant and replace with new tenant "${nameTrim}" while keeping and accumulating all past monthly revenues for the landlord?`
-      );
-      if (!confirmReplace) return;
-
       // Preserve 100% of past room revenue in history and link to new tenant
       archiveOldTenantRevenueAndKeepCumulative(cleanR, existingActive, nameTrim);
     } else {
@@ -814,49 +931,55 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
       return updated;
     });
 
-    // If new meter readings were also provided at registration, create/update the monthly history record
-    if (eNew || wNew) {
-      const eUsage = Math.max(0, (parseFloat(eNew || eOld) || 0) - (parseFloat(eOld) || 0));
-      const wUsage = Math.max(0, (parseFloat(wNew || wOld) || 0) - (parseFloat(wOld) || 0));
-      const eUsd = (eUsage * elecRateRiel) / 4000;
-      const wUsd = (wUsage * waterRateRiel) / 4000;
-      const totalUsd = rPrice + wPrice + eUsd + wUsd;
-      const mPrefix = (newTenantForm.checkInDate || nowIso.split('T')[0]).slice(0, 7);
-      const recId = `h-${mPrefix}-RM${cleanR.padStart(2, '0')}`;
+    // Accumulate (cộng dồn) new tenant's rental record onto existing preserved room revenue in history
+    const eUsage = Math.max(0, (parseFloat(eNew || eOld) || 0) - (parseFloat(eOld) || 0));
+    const wUsage = Math.max(0, (parseFloat(wNew || wOld) || 0) - (parseFloat(wOld) || 0));
+    const eUsd = (eUsage * elecRateRiel) / 4000;
+    const wUsd = (wUsage * waterRateRiel) / 4000;
+    const totalUsd = rPrice + wPrice + eUsd + wUsd;
+    const mPrefix = (newTenantForm.checkInDate || nowIso.split('T')[0]).slice(0, 7);
+    const recId = `h-${mPrefix}-RM${cleanR.padStart(2, '0')}-${Date.now()}`;
 
-      const newHist: SharedHistoryRecord = {
-        id: recId,
-        tenantName: nameTrim,
-        roomNo: cleanR,
-        paymentDate: newTenantForm.checkInDate || nowIso.split('T')[0],
-        roomPrice: rPrice,
-        wifiPrice: wPrice,
-        elecPrice: Number(eUsd.toFixed(2)),
-        waterPrice: Number(wUsd.toFixed(2)),
-        otherPrice: 0,
-        totalUsd: Number(totalUsd.toFixed(2)),
-        elecUsage: eUsage,
-        waterUsage: wUsage,
-        status: 'PAID',
-        tenantIdNo: stableId,
-        elecOld: eOld,
-        elecNew: eNew || eOld,
-        waterOld: wOld,
-        waterNew: wNew || wOld,
-        recordedBy: actorLabel,
-        recordedAt: nowIso
-      };
+    const newHist: SharedHistoryRecord = {
+      id: recId,
+      tenantName: nameTrim,
+      roomNo: cleanR,
+      paymentDate: newTenantForm.checkInDate || nowIso.split('T')[0],
+      roomPrice: rPrice,
+      wifiPrice: wPrice,
+      elecPrice: Number(eUsd.toFixed(2)),
+      waterPrice: Number(wUsd.toFixed(2)),
+      otherPrice: 0,
+      totalUsd: Number(totalUsd.toFixed(2)),
+      elecUsage: eUsage,
+      waterUsage: wUsage,
+      status: 'PAID',
+      tenantIdNo: stableId,
+      elecOld: eOld,
+      elecNew: eNew || eOld,
+      waterOld: wOld,
+      waterNew: wNew || wOld,
+      recordedBy: actorLabel,
+      recordedAt: nowIso
+    };
 
-      setHistory(prev => {
-        const filtered = prev.filter(item => item.id !== recId);
-        const updated = [newHist, ...filtered];
-        localStorage.setItem('invoice_history', JSON.stringify(updated));
-        return updated;
-      });
-    }
+    setHistory(prev => {
+      // Never remove archived old tenant revenue records; accumulate (cộng dồn) new tenant record on top
+      const updated = [newHist, ...prev];
+      localStorage.setItem('invoice_history', JSON.stringify(updated));
+      return updated;
+    });
 
     onSelectTenantForInvoice(newTenantRecord);
+    setEditingRoomNo(cleanR);
+    setLastSystemAutoSync(new Date().toLocaleTimeString());
     playAudioFeedback?.('success');
+
+    onSystemTenantUpdated?.({
+      roomNo: cleanR,
+      tenantName: nameTrim,
+      action: 'new'
+    });
 
     appendAuditLog({
       actorName: actorLabel,
@@ -883,8 +1006,8 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
 
     showNotice(
       'success',
-      `✅ បានរក្សាទុកភ្ញៀវថ្មី "${nameTrim}" ចូលបន្ទប់ ${formatRoomCode(cleanR)} ដោយជោគជ័យ! ចំណូលខែមុនៗរបស់បន្ទប់នេះត្រូវបានរក្សាទុក និងបូកបន្ត។`,
-      `Saved new tenant "${nameTrim}" (${stableId}) to ${formatRoomCode(cleanR)}. All past monthly room revenues are preserved and continue accumulating.`
+      `✅ ប្រព័ន្ធបានធ្វើបច្ចុប្បន្នភាពដោយស្វ័យប្រវត្តិ៖ បានបញ្ចូលភ្ញៀវថ្មី "${nameTrim}" ចូលបន្ទប់ ${formatRoomCode(cleanR)} រួចរាល់! ចំណូលខែមុនៗត្រូវបានរក្សាទុកបូកបន្ត។`,
+      `System Automatically Updated: Added new tenant "${nameTrim}" (${stableId}) to ${formatRoomCode(cleanR)}. Past monthly room revenues are preserved and continue accumulating.`
     );
 
     // Reset form
@@ -899,7 +1022,7 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
     }));
   };
 
-  // 2. Handle Updating Current Tenant Info by Manager (also supports changing tenant while keeping cumulative revenue)
+  // 2. Handle Updating Current Tenant Info by Manager (also supports entering a new tenant into a vacant room & keeping cumulative revenue)
   const handleManagerUpdateCurrentTenant = (e: React.FormEvent) => {
     e.preventDefault();
     if (resolvedRole === 'manager' && !effectiveManager.permissions.canUpdateTenant) {
@@ -913,23 +1036,25 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
 
     const cleanR = normalizeRoom(editingRoomNo);
     const existing = savedTenants.find(t => normalizeRoom(t.roomNo) === cleanR);
-    if (!existing) {
-      showNotice('error', 'រកមិនឃើញភ្ញៀវក្នុងបន្ទប់នេះទេ!', 'No active tenant found in this room.');
+    const newNameTrim = editTenantForm.tenantName.trim() || existing?.tenantName || '';
+
+    if (!newNameTrim) {
+      showNotice(
+        'error',
+        'សូមបញ្ចូលឈ្មោះភ្ញៀវជួល!',
+        'Please enter the tenant name.'
+      );
       return;
     }
 
     const canEditPrice = resolvedRole === 'owner' || effectiveManager.permissions.canModifyPrices;
-    const finalRoomPrice = canEditPrice ? Number(editTenantForm.roomPrice) : existing.roomPrice;
-    const finalWifiPrice = canEditPrice ? Number(editTenantForm.wifiPrice) : existing.wifiPrice;
-    const finalDeposit = canEditPrice ? Number(editTenantForm.deposit) : existing.deposit || 0;
-    const stableId = formatStableTenantId(cleanR, editTenantForm.tenantIdNo || existing.tenantIdNo);
+    const finalRoomPrice = canEditPrice ? Number(editTenantForm.roomPrice) || 80 : existing?.roomPrice ?? 80;
+    const finalWifiPrice = canEditPrice ? Number(editTenantForm.wifiPrice) || 0 : existing?.wifiPrice ?? 0;
+    const finalDeposit = canEditPrice ? Number(editTenantForm.deposit) || 0 : existing?.deposit ?? 0;
+    const stableId = formatStableTenantId(cleanR, editTenantForm.tenantIdNo || existing?.tenantIdNo);
+    const cleanElecOld = String(editTenantForm.elecOld ?? existing?.elecOld ?? '0').trim() || '0';
+    const cleanWaterOld = String(editTenantForm.waterOld ?? existing?.waterOld ?? '0').trim() || '0';
     const nowIso = new Date().toISOString();
-    const newNameTrim = editTenantForm.tenantName.trim() || existing.tenantName;
-
-    // If tenant name changed, preserve all historical revenue of this room and link to the new name
-    if (newNameTrim.toLowerCase() !== existing.tenantName.trim().toLowerCase()) {
-      archiveOldTenantRevenueAndKeepCumulative(cleanR, existing, newNameTrim);
-    }
 
     const actorLabel =
       resolvedRole === 'owner'
@@ -937,49 +1062,124 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
         : `${effectiveManager.fullName} (${effectiveManager.khmerName})`;
 
     const updatedTenant: SharedTenantRecord = {
-      ...existing,
+      ...(existing || {}),
+      roomNo: cleanR,
       tenantName: newNameTrim,
       tenantIdNo: stableId,
       tenantPhone: editTenantForm.tenantPhone.trim(),
-      checkInDate: editTenantForm.checkInDate || existing.checkInDate,
+      checkInDate: editTenantForm.checkInDate || existing?.checkInDate || nowIso.split('T')[0],
       roomPrice: finalRoomPrice,
       wifiPrice: finalWifiPrice,
       deposit: finalDeposit,
+      elecOld: cleanElecOld,
+      waterOld: cleanWaterOld,
       notes: editTenantForm.notes.trim(),
       updatedBy: actorLabel,
       updatedAt: nowIso
     };
 
     setSavedTenants(prev => {
-      const updated = prev.map(t => (normalizeRoom(t.roomNo) === cleanR ? updatedTenant : t));
+      const hasRoom = prev.some(t => normalizeRoom(t.roomNo) === cleanR);
+      const updated = hasRoom
+        ? prev.map(t => (normalizeRoom(t.roomNo) === cleanR ? updatedTenant : t))
+        : [...prev, updatedTenant].sort(
+            (a, b) => (parseInt(normalizeRoom(a.roomNo)) || 0) - (parseInt(normalizeRoom(b.roomNo)) || 0)
+          );
       localStorage.setItem('savedTenants', JSON.stringify(updated));
       return updated;
     });
 
+    // Synchronize active (non-archived) records in history so all system views immediately reflect the updated tenant info
+    setHistory(prev => {
+      const currentMonthPrefix = (updatedTenant.checkInDate || nowIso.split('T')[0]).slice(0, 7);
+      const hasActiveRoomRec = prev.some(
+        r => !r.id.startsWith('h-archived-') && normalizeRoom(r.roomNo) === cleanR
+      );
+
+      let updated: SharedHistoryRecord[];
+      if (hasActiveRoomRec) {
+        updated = prev.map(rec => {
+          if (!rec.id.startsWith('h-archived-') && normalizeRoom(rec.roomNo) === cleanR) {
+            const newTotal =
+              finalRoomPrice +
+              finalWifiPrice +
+              (Number(rec.elecPrice) || 0) +
+              (Number(rec.waterPrice) || 0) +
+              (Number(rec.otherPrice) || 0);
+            return {
+              ...rec,
+              tenantName: newNameTrim,
+              tenantIdNo: stableId,
+              roomPrice: finalRoomPrice,
+              wifiPrice: finalWifiPrice,
+              totalUsd: Number(newTotal.toFixed(2))
+            };
+          }
+          return rec;
+        });
+      } else {
+        const newRec: SharedHistoryRecord = {
+          id: `h-${currentMonthPrefix}-RM${cleanR.padStart(2, '0')}-${Date.now()}`,
+          tenantName: newNameTrim,
+          roomNo: cleanR,
+          paymentDate: updatedTenant.checkInDate,
+          roomPrice: finalRoomPrice,
+          wifiPrice: finalWifiPrice,
+          elecPrice: 0,
+          waterPrice: 0,
+          otherPrice: 0,
+          totalUsd: Number((finalRoomPrice + finalWifiPrice).toFixed(2)),
+          elecUsage: 0,
+          waterUsage: 0,
+          status: 'PAID',
+          tenantIdNo: stableId,
+          elecOld: cleanElecOld,
+          elecNew: cleanElecOld,
+          waterOld: cleanWaterOld,
+          waterNew: cleanWaterOld,
+          recordedBy: actorLabel,
+          recordedAt: nowIso
+        };
+        updated = [newRec, ...prev];
+      }
+
+      localStorage.setItem('invoice_history', JSON.stringify(updated));
+      return updated;
+    });
+
     onSelectTenantForInvoice(updatedTenant);
+    setLastSystemAutoSync(new Date().toLocaleTimeString());
     playAudioFeedback?.('success');
+
+    onSystemTenantUpdated?.({
+      roomNo: cleanR,
+      tenantName: newNameTrim,
+      action: existing ? 'edit' : 'new'
+    });
 
     appendAuditLog({
       actorName: actorLabel,
       actorUsername: resolvedRole === 'owner' ? 'admin' : effectiveManager.username,
       actorRole: resolvedRole === 'owner' ? 'OWNER' : 'MANAGER',
-      actionType: 'UPDATE_TENANT',
+      actionType: existing ? 'UPDATE_TENANT' : 'CREATE_TENANT',
       roomNo: cleanR,
       tenantId: stableId,
       tenantName: updatedTenant.tenantName,
       monthStr: selectedMonthYear,
-      valueBefore: `${existing.tenantName} | Tel: ${existing.tenantPhone} | $${existing.roomPrice}`,
+      valueBefore: existing
+        ? `${existing.tenantName} | Tel: ${existing.tenantPhone} | $${existing.roomPrice}`
+        : 'បន្ទប់ទំនេរ (Vacant)',
       valueAfter: `${updatedTenant.tenantName} | Tel: ${updatedTenant.tenantPhone} | $${updatedTenant.roomPrice}`,
       status: isOnline ? 'SYNCED' : 'VERIFIED',
       notes:
         editTenantForm.notes.trim() ||
-        'ធ្វើបច្ចុប្បន្នភាពព័ត៌មានភ្ញៀវ (រក្សាទុកចំណូលបូកបន្ត) / Updated tenant info (cumulative revenue preserved)'
+        'ប្រព័ន្ធធ្វើបច្ចុប្បន្នភាពព័ត៌មានភ្ញៀវដោយស្វ័យប្រវត្តិ (រក្សាទុកចំណូលបូកបន្ត) / System automatically updated tenant info (cumulative revenue preserved)'
     });
 
     showNotice(
       'success',
-      `✅ បានធ្វើបច្ចុប្បន្នភាពព័ត៌មានភ្ញៀវបន្ទប់ ${formatRoomCode(cleanR)} ដោយជោគជ័យ! ចំណូលគ្រប់ខែត្រូវបានរក្សាទុកបូកបន្ត។`,
-      `Successfully updated tenant profile for ${formatRoomCode(cleanR)}. Cumulative room revenue is preserved.`
+      `✅ ប្រព័ន្ធបានធ្វើបច្ចុប្បន្នភាពដោយស្វ័យប្រវត្តិ៖ ព័ត៌មានភ្ញៀវ "${newNameTrim}" បន្ទប់ ${formatRoomCode(cleanR)} ត្រូវបានកែប្រែ និងរក្សាទុកក្នុងប្រព័ន្ធរួចរាល់!`,
+      `System Automatically Updated: Tenant profile "${newNameTrim}" for ${formatRoomCode(cleanR)} is synced across all views.`
     );
   };
 
@@ -1070,10 +1270,12 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
       recordedAt: nowIso
     };
 
-    // 1. Update main history (Idempotent Upsert for this room+month, accumulates with all previous months!)
+    // 1. Update main history (Idempotent Upsert for current tenant in this room+month, while preserving all archived old tenant records so revenue accumulates!)
     setHistory(prev => {
       const withoutDuplicate = prev.filter(
-        h => !(normalizeRoom(h.roomNo) === cleanR && h.paymentDate.startsWith(meterMonth))
+        h =>
+          h.id.startsWith('h-archived-') ||
+          !(normalizeRoom(h.roomNo) === cleanR && h.paymentDate.startsWith(meterMonth))
       );
       const updated = [newHistoryRecord, ...withoutDuplicate];
       localStorage.setItem('invoice_history', JSON.stringify(updated));
@@ -1129,8 +1331,8 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
 
     showNotice(
       'success',
-      `✅ បានរក្សាទុកលេខទឹក-ភ្លើងបន្ទប់ ${formatRoomCode(cleanR)} (${activeTenant.tenantName}) សម្រាប់ខែ ${meterMonth} ដោយជោគជ័យ!`,
-      `Synced ${formatRoomCode(cleanR)} (${elecUsage} kWh = $${elecUsd.toFixed(2)}, ${waterUsage} m³ = $${waterUsd.toFixed(2)}, Total: $${newHistoryRecord.totalUsd.toFixed(2)}) to HSN master database.`
+      `✅ បានរក្សាទុកលេខទឹក-ភ្លើងបន្ទប់ ${formatRoomCode(cleanR)} សម្រាប់ខែ ${meterMonth} ដោយជោគជ័យ!`,
+      `Synced ${formatRoomCode(cleanR)} (${elecUsage} kWh, ${waterUsage} m³) to HSN master database.`
     );
   };
 
@@ -1467,7 +1669,7 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
   // ============================================================================
   // RENDER OWNER MENU VIEWS: អ្នកគ្រប់គ្រង | បញ្ជីអ្នកគ្រប់គ្រង | ចែករំលែកសិទ្ធិ
   // ============================================================================
-  if (mode === 'owner_overview' || mode === 'owner_list' || mode === 'owner_access') {
+  if ((mode === 'owner_overview' || mode === 'owner_list' || mode === 'owner_access') && resolvedRole === 'owner') {
     const targetMgr =
       managerAccounts.find(m => m.id === selectedMgrIdForPerms) ||
       managerAccounts[0] ||
@@ -2306,67 +2508,75 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
         </div>
       )}
 
-      {/* 6 Navigation Modules of Nguon Sopheak Management Dashboard */}
+      {/* Navigation Modules of Nguon Sopheak Management Dashboard */}
       <div className="bg-stone-900 p-2 rounded-2xl border border-emerald-600/50 flex items-center gap-1.5 overflow-x-auto">
         {[
           {
             id: 'assignedRooms',
-            label: tr('១. បន្ទប់ដែលបានកំណត់', '1. Assigned Rooms'),
-            sub: tr('បញ្ជីបន្ទប់ & ប្តូរភ្ញៀវរក្សាចំណូល', 'Rooms & Vacate/Keep Revenue'),
-            icon: Home
+            label: tr('១. បន្ទប់ទាំង ១៦', '1. Assigned Rooms (16)'),
+            sub: tr('បញ្ជីបន្ទប់ • ភ្ញៀវថ្មី • កែភ្ញៀវចាស់', 'Rooms • New & Existing Tenants'),
+            icon: Home,
+            showForManager: true
           },
           {
             id: 'newTenant',
-            label: tr('២. អតិថិជនថ្មី', '2. New Tenant'),
-            sub: tr('ចុះឈ្មោះភ្ញៀវថ្មី (បូកបន្តចំណូល)', 'Register New Tenant'),
-            icon: Plus
+            label: tr('២. បញ្ចូលភ្ញៀវថ្មី', '2. Enter New Tenant'),
+            sub: tr('ចុះឈ្មោះភ្ញៀវជួលថ្មី', 'Register New Tenant'),
+            icon: Plus,
+            showForManager: true
           },
           {
             id: 'currentTenants',
-            label: tr('៣. អតិថិជនចាស់', '3. Current Tenants'),
-            sub: tr('ស្វែងរក & កែប្រែព័ត៌មានភ្ញៀវ', 'Search & Update Tenants'),
-            icon: Users
-          },
-          {
-            id: 'waterMeter',
-            label: tr('៤. កត់ត្រាលេខទឹក', '4. Water Meter'),
-            sub: tr('បញ្ចូលលេខកុងទ័រទឹកប្រចាំខែ', 'Monthly Water Readings'),
-            icon: Droplets
+            label: tr('៣. កែសម្រួលភ្ញៀវចាស់', '3. Edit Existing Tenants'),
+            sub: tr('ស្វែងរក & កែប្រែព័ត៌មានភ្ញៀវចាស់', 'Search & Edit Existing Tenants'),
+            icon: Users,
+            showForManager: true
           },
           {
             id: 'elecMeter',
-            label: tr('៥. កត់ត្រាលេខភ្លើង', '5. Electricity Meter'),
+            label: tr('៤. កត់ត្រាលេខភ្លើង', '4. Electricity Meter'),
             sub: tr('បញ្ចូលលេខកុងទ័រភ្លើងប្រចាំខែ', 'Monthly Electricity Readings'),
-            icon: Zap
+            icon: Zap,
+            showForManager: true
+          },
+          {
+            id: 'waterMeter',
+            label: tr('៥. កត់ត្រាលេខទឹក', '5. Water Meter'),
+            sub: tr('បញ្ចូលលេខកុងទ័រទឹកប្រចាំខែ', 'Monthly Water Readings'),
+            icon: Droplets,
+            showForManager: true
           },
           {
             id: 'entryHistory',
-            label: tr('៦. ប្រវត្តិកត់ត្រា', '6. Entry History'),
-            sub: tr('ប្រវត្តិទឹកភ្លើង & កំណត់ហេតុត្រួតពិនិត្យ', 'Utility History & Audit Log'),
-            icon: History
+            label: tr('៦. ប្រវត្តិកត់ត្រា & ចំណូល', '6. Entry History & Revenue'),
+            sub: tr('សម្រាប់ម្ចាស់ផ្ទះត្រួតពិនិត្យប៉ុណ្ណោះ', 'Owner Audit & Revenue Only'),
+            icon: History,
+            showForManager: false
           }
-        ].map(tab => {
-          const IconComp = tab.icon;
-          const active = sopheakTab === tab.id;
-          return (
-            <button
-              key={tab.id}
-              type="button"
-              onClick={() => setSopheakTab(tab.id as any)}
-              className={`px-3.5 py-2.5 rounded-xl text-left transition-all cursor-pointer shrink-0 flex items-center gap-2 border ${
-                active
-                  ? 'bg-emerald-600 text-white border-white font-black shadow-md'
-                  : 'bg-stone-800/90 text-stone-200 border-stone-700 hover:bg-emerald-900/60'
-              }`}
-            >
-              <IconComp className="w-4 h-4 shrink-0" />
-              <div>
-                <div className="text-xs font-extrabold whitespace-nowrap">{tab.label}</div>
-                <div className="text-[10px] opacity-90 whitespace-nowrap">{tab.sub}</div>
-              </div>
-            </button>
-          );
-        })}
+        ]
+          .filter(tab => resolvedRole === 'owner' || tab.showForManager)
+          .map(tab => {
+            const IconComp = tab.icon;
+            const active = sopheakTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setSopheakTab(tab.id as any)}
+                className={`px-3.5 py-2.5 rounded-xl text-left transition-all cursor-pointer shrink-0 flex items-center gap-2 border ${
+                  active
+                    ? 'bg-emerald-600 text-white border-white font-black shadow-md'
+                    : 'bg-stone-800/90 text-stone-200 border-stone-700 hover:bg-emerald-900/60'
+                }`}
+              >
+                <IconComp className="w-4 h-4 shrink-0" />
+                <div>
+                  <div className="text-xs font-extrabold whitespace-nowrap">{tab.label}</div>
+                  <div className="text-[10px] opacity-90 whitespace-nowrap">{tab.sub}</div>
+                </div>
+              </button>
+            );
+          })}
       </div>
 
       {/* Global Search Bar */}
@@ -2467,21 +2677,32 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
                       )}
                     </div>
 
-                    {/* Cumulative Landlord Revenue Badge for this Room */}
-                    <div className="mt-2 bg-emerald-50/90 border border-emerald-200 rounded-lg px-2.5 py-1.5 flex items-center justify-between text-[11px]">
-                      <span className="font-bold text-emerald-900 flex items-center gap-1">
-                        <TrendingUp className="w-3.5 h-3.5 text-emerald-600" />
-                        <span>{tr('ចំណូលបូកបន្តសរុប៖', 'Cumulative Revenue:')}</span>
-                      </span>
-                      <span className="font-mono font-black text-emerald-800">${cumRevenue.toFixed(2)}</span>
-                    </div>
+                    {/* Cumulative Landlord Revenue Badge — visible ONLY to Owner (Admin), hidden for Manager */}
+                    {resolvedRole === 'owner' && (
+                      <div className="mt-2 bg-emerald-50/90 border border-emerald-200 rounded-lg px-2.5 py-1.5 flex items-center justify-between text-[11px]">
+                        <span className="font-bold text-emerald-900 flex items-center gap-1">
+                          <TrendingUp className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>{tr('ចំណូលបូកបន្តសរុប៖', 'Cumulative Revenue:')}</span>
+                        </span>
+                        <span className="font-mono font-black text-emerald-800">${cumRevenue.toFixed(2)}</span>
+                      </div>
+                    )}
 
                     {tenant ? (
                       <div className="mt-2.5 space-y-1 text-xs">
-                        <div className="font-moul text-sm text-blue-950">{tenant.tenantName}</div>
-                        <div className="text-stone-600 font-mono">
-                          Tel: {tenant.tenantPhone || '—'} • ${tenant.roomPrice}/{tr('ខែ', 'mo')}
-                        </div>
+                        {resolvedRole === 'owner' ? (
+                          <>
+                            <div className="font-moul text-sm text-blue-950">{tenant.tenantName}</div>
+                            <div className="text-stone-600 font-mono">
+                              Tel: {tenant.tenantPhone || '—'} • ${tenant.roomPrice}/{tr('ខែ', 'mo')}
+                            </div>
+                          </>
+                        ) : (
+                          <div className="font-extrabold text-xs text-emerald-900 bg-emerald-50 border border-emerald-200 px-2.5 py-1.5 rounded-lg flex items-center justify-between">
+                            <span>{tr('បន្ទប់ភ្ញៀវជួល៖', 'Tenant Room:')}</span>
+                            <span className="font-mono font-black text-sm">{formatRoomCode(cleanR)}</span>
+                          </div>
+                        )}
                         <div className="flex items-center justify-between pt-1.5 border-t border-stone-100 font-mono text-[11px]">
                           <span className="text-amber-800 font-bold">
                             ⚡ {tr('ភ្លើងចាស់៖', 'Old Elec:')} {tenant.elecOld || '0'} kWh
@@ -2534,12 +2755,12 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
                             onClick={() => handleVacateTenantKeepRevenue(tenant)}
                             className="py-1.5 px-2 bg-red-50 hover:bg-red-600 text-red-700 hover:text-white border border-red-300 text-[11px] font-extrabold rounded-lg cursor-pointer flex items-center justify-center gap-1 transition-colors"
                             title={tr(
-                              'លុបព័ត៌មានភ្ញៀវឈប់ជួល ប៉ុន្តែរក្សាទុកចំណូលខែមុនៗបូកបន្ត',
-                              'Remove vacated tenant info while keeping all past revenue'
+                              'លុបភ្ញៀវចាស់ ប៉ុន្តែរក្សាទុកចំណូលរបស់ម្ចាស់ផ្ទះបូកបន្តពេលមានភ្ញៀវថ្មីចូលជួល',
+                              'Delete old tenant while keeping landlord cumulative revenue when a new tenant rents'
                             )}
                           >
                             <UserMinus className="w-3.5 h-3.5 shrink-0" />
-                            <span className="truncate">{tr('លុបភ្ញៀវឈប់ជួល', 'Vacate (Keep $)')}</span>
+                            <span className="truncate">{tr('លុបភ្ញៀវចាស់', 'Delete Old Tenant')}</span>
                           </button>
 
                           <button
@@ -2614,7 +2835,7 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 text-xs">
             <div>
               <label className="block font-extrabold text-stone-700 mb-1">
-                {tr('លេខបន្ទប់ (1 - 17) *', 'Room Number (1 - 17) *')}
+                {tr('លេខបន្ទប់ (1 - 16) *', 'Room Number (1 - 16) *')}
               </label>
               <select
                 value={newTenantForm.roomNo}
@@ -2627,7 +2848,9 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
                     <option key={`new-r-${r}`} value={r}>
                       {formatRoomCode(r)}{' '}
                       {occ
-                        ? tr(`(មានភ្ញៀវ: ${occ.tenantName})`, `(Occupied: ${occ.tenantName})`)
+                        ? resolvedRole === 'owner'
+                          ? tr(`(មានភ្ញៀវ: ${occ.tenantName})`, `(Occupied: ${occ.tenantName})`)
+                          : tr('(មានភ្ញៀវជួល / Occupied)', '(Occupied)')
                         : tr('— ទំនេរ (Vacant)', '— Vacant')}
                     </option>
                   );
@@ -2804,10 +3027,12 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
                 )}
               </span>
             </label>
-            <span className="font-mono text-xs font-black text-emerald-800 shrink-0">
-              {tr('ចំណូលបន្ទប់នេះ៖', 'Room Cumulative:')} $
-              {(roomCumulativeRevenueMap[normalizeRoom(newTenantForm.roomNo)] || 0).toFixed(2)}
-            </span>
+            {resolvedRole === 'owner' && (
+              <span className="font-mono text-xs font-black text-emerald-800 shrink-0">
+                {tr('ចំណូលបន្ទប់នេះ៖', 'Room Cumulative:')} $
+                {(roomCumulativeRevenueMap[normalizeRoom(newTenantForm.roomNo)] || 0).toFixed(2)}
+              </span>
+            )}
           </div>
 
           <div className="text-xs">
@@ -2848,8 +3073,8 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
           <div className="lg:col-span-7 bg-white rounded-2xl border border-stone-200 p-5 shadow-sm space-y-4">
             <h3 className="text-sm font-extrabold text-stone-900 border-b border-stone-200 pb-2.5">
               {tr(
-                `បញ្ជីអតិថិជនកំពុងជួលបច្ចុប្បន្ន (${filteredScopedTenants.length} បន្ទប់)`,
-                `Current Active Tenants (${filteredScopedTenants.length} Rooms)`
+                `បញ្ជីលេខបន្ទប់ភ្ញៀវកំពុងជួល (${filteredScopedTenants.length} បន្ទប់)`,
+                `Occupied Tenant Room Numbers (${filteredScopedTenants.length} Rooms)`
               )}
             </h3>
             <div className="space-y-2.5 max-h-[520px] overflow-y-auto pr-1">
@@ -2869,21 +3094,31 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
                   >
                     <div>
                       <div className="flex items-center gap-2">
-                        <span className="font-mono font-black text-xs bg-emerald-900 text-white px-2 py-0.5 rounded">
+                        <span className="font-mono font-black text-xs bg-emerald-900 text-white px-2.5 py-1 rounded-lg">
                           {formatRoomCode(t.roomNo)}
                         </span>
-                        <span className="font-moul text-sm text-blue-950">{t.tenantName}</span>
+                        {resolvedRole === 'owner' ? (
+                          <span className="font-moul text-sm text-blue-950">{t.tenantName}</span>
+                        ) : (
+                          <span className="font-extrabold text-xs text-emerald-900">
+                            {tr(`បន្ទប់ភ្ញៀវជួល ${formatRoomCode(t.roomNo)}`, `Tenant Room ${formatRoomCode(t.roomNo)}`)}
+                          </span>
+                        )}
                       </div>
-                      <div className="text-xs text-stone-600 font-mono mt-1">
-                        Tel: {t.tenantPhone || '—'} • {tr('ចំណូលបូកបន្ត៖', 'Cumulative Revenue:')}{' '}
-                        <strong className="text-emerald-800">${cumRev.toFixed(2)}</strong>
-                      </div>
+                      {resolvedRole === 'owner' && (
+                        <div className="text-xs text-stone-600 font-mono mt-1">
+                          Tel: {t.tenantPhone || '—'} • {tr('ចំណូលបូកបន្ត៖', 'Cumulative Revenue:')}{' '}
+                          <strong className="text-emerald-800">${cumRev.toFixed(2)}</strong>
+                        </div>
+                      )}
                     </div>
                     <div className="flex items-center gap-2">
                       <div className="text-right font-mono mr-2">
-                        <div className="font-black text-sm text-emerald-800">
-                          ${t.roomPrice}/{tr('ខែ', 'mo')}
-                        </div>
+                        {resolvedRole === 'owner' && (
+                          <div className="font-black text-sm text-emerald-800">
+                            ${t.roomPrice}/{tr('ខែ', 'mo')}
+                          </div>
+                        )}
                         <div className="text-[11px] text-stone-500">
                           ⚡{t.elecOld} | 💧{t.waterOld}
                         </div>
@@ -2896,12 +3131,12 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
                         }}
                         className="px-2.5 py-1.5 bg-red-600 hover:bg-red-500 text-white text-[11px] font-extrabold rounded-lg cursor-pointer flex items-center gap-1"
                         title={tr(
-                          'លុបព័ត៌មានភ្ញៀវឈប់ជួល ប៉ុន្តែរក្សាទុកចំណូលបូកបន្ត',
-                          'Clear vacated tenant info while keeping cumulative revenue'
+                          'លុបព័ត៌មានភ្ញៀវចាស់ ប៉ុន្តែរក្សាទុកចំណូលម្ចាស់ផ្ទះបូកបន្តពេលមានភ្ញៀវថ្មីជួល',
+                          'Delete old tenant info while keeping landlord cumulative revenue when a new tenant rents'
                         )}
                       >
                         <UserMinus className="w-3.5 h-3.5" />
-                        <span>{tr('ឈប់ជួល (រក្សាចំណូល)', 'Vacate (Keep $)')}</span>
+                        <span>{tr('លុបភ្ញៀវចាស់ (រក្សាចំណូល)', 'Delete Old Tenant')}</span>
                       </button>
                     </div>
                   </div>
@@ -2916,12 +3151,28 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
               className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm space-y-4"
             >
               <div className="flex items-center justify-between border-b border-stone-200 pb-2.5">
-                <h3 className="text-sm font-extrabold text-emerald-950">
-                  {tr(
-                    `កែប្រែ ឬប្តូរភ្ញៀវបន្ទប់ ${formatRoomCode(editingRoomNo)}`,
-                    `Update or Change Tenant for ${formatRoomCode(editingRoomNo)}`
-                  )}
-                </h3>
+                <div>
+                  <h3 className="text-sm font-extrabold text-emerald-950">
+                    {tr(
+                      `កែប្រែព័ត៌មានភ្ញៀវបន្ទប់ ${formatRoomCode(editingRoomNo)}`,
+                      `Edit Tenant Information for ${formatRoomCode(editingRoomNo)}`
+                    )}
+                  </h3>
+                  <div className="flex items-center gap-1.5 mt-1">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                    <span className="text-[10px] font-bold text-emerald-700">
+                      {lastSystemAutoSync
+                        ? tr(
+                            `ប្រព័ន្ធបានធ្វើបច្ចុប្បន្នភាពស្វ័យប្រវត្តិ (${lastSystemAutoSync})`,
+                            `System auto-updated (${lastSystemAutoSync})`
+                          )
+                        : tr(
+                            'ប្រព័ន្ធធ្វើបច្ចុប្បន្នភាពដោយស្វ័យប្រវត្តិពេលកែប្រែ',
+                            'System automatically updates on edit'
+                          )}
+                    </span>
+                  </div>
+                </div>
                 {resolvedRole === 'manager' && !effectiveManager.permissions.canModifyPrices && (
                   <span className="text-[10px] font-black bg-amber-100 text-amber-900 px-2 py-0.5 rounded flex items-center gap-1">
                     <Lock className="w-3 h-3" /> {tr('ចាក់សោតម្លៃ', 'Price Locked')}
@@ -2932,7 +3183,7 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
               <div className="space-y-3 text-xs">
                 <div>
                   <label className="block font-bold text-stone-700 mb-1">
-                    {tr('ជ្រើសរើសបន្ទប់ (ទាំង ១៦ បន្ទប់)', 'Select Room (All 16 Rooms)')}
+                    {tr('ជ្រើសរើសលេខបន្ទប់ (ទាំង ១៦ បន្ទប់)', 'Select Room Number (All 16 Rooms)')}
                   </label>
                   <select
                     value={editingRoomNo}
@@ -2944,7 +3195,12 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
                       const occ = savedTenants.find(t => normalizeRoom(t.roomNo) === cleanR);
                       return (
                         <option key={`edit-sel-${cleanR}`} value={cleanR}>
-                          {formatRoomCode(cleanR)} — {occ ? occ.tenantName : tr('បន្ទប់ទំនេរ', 'Vacant Room')}
+                          {formatRoomCode(cleanR)} —{' '}
+                          {occ
+                            ? resolvedRole === 'owner'
+                              ? occ.tenantName
+                              : tr('មានភ្ញៀវជួល (Occupied)', 'Occupied')
+                            : tr('បន្ទប់ទំនេរ', 'Vacant Room')}
                         </option>
                       );
                     })}
@@ -2953,14 +3209,15 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
 
                 <div>
                   <label className="block font-bold text-stone-700 mb-1">
-                    {tr('ឈ្មោះភ្ញៀវជួល (បើប្តូរឈ្មោះថ្មី ចំណូលចាស់នៅតែបូកបន្ត)', 'Tenant Name (Cumulative revenue preserved on change)')}
+                    {tr('ឈ្មោះភ្ញៀវជួល (ប្រព័ន្ធធ្វើបច្ចុប្បន្នភាពដោយស្វ័យប្រវត្តិ) *', 'Tenant Name (System Auto-Updates) *')}
                   </label>
                   <input
                     type="text"
                     required
+                    placeholder={tr('បញ្ចូលឈ្មោះភ្ញៀវជួល...', 'Enter tenant full name...')}
                     value={editTenantForm.tenantName}
                     onChange={e => setEditTenantForm({ ...editTenantForm, tenantName: e.target.value })}
-                    className="w-full bg-stone-50 border border-stone-300 rounded-xl p-2.5 font-bold"
+                    className="w-full bg-stone-50 border border-stone-300 rounded-xl p-2.5 font-bold focus:border-emerald-600 focus:bg-white outline-none"
                   />
                 </div>
 
@@ -2973,7 +3230,7 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
                       type="text"
                       value={editTenantForm.tenantIdNo}
                       onChange={e => setEditTenantForm({ ...editTenantForm, tenantIdNo: e.target.value })}
-                      className="w-full bg-stone-50 border border-stone-300 rounded-xl p-2.5 font-mono font-bold"
+                      className="w-full bg-stone-50 border border-stone-300 rounded-xl p-2.5 font-mono font-bold focus:border-emerald-600 focus:bg-white outline-none"
                     />
                   </div>
                   <div>
@@ -2984,7 +3241,46 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
                       type="text"
                       value={editTenantForm.tenantPhone}
                       onChange={e => setEditTenantForm({ ...editTenantForm, tenantPhone: e.target.value })}
-                      className="w-full bg-stone-50 border border-stone-300 rounded-xl p-2.5 font-mono font-bold"
+                      className="w-full bg-stone-50 border border-stone-300 rounded-xl p-2.5 font-mono font-bold focus:border-emerald-600 focus:bg-white outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-3 gap-2.5">
+                  <div>
+                    <label className="block font-bold text-stone-700 mb-1">
+                      {tr('ថ្ងៃចូលស្នាក់នៅ', 'Check-in Date')}
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="YYYY-MM-DD"
+                      value={editTenantForm.checkInDate}
+                      onChange={e => setEditTenantForm({ ...editTenantForm, checkInDate: e.target.value })}
+                      className="w-full bg-stone-50 border border-stone-300 rounded-xl p-2.5 font-mono font-bold focus:border-emerald-600 focus:bg-white outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-bold text-amber-900 mb-1">
+                      ⚡ {tr('ភ្លើងចាស់ (kWh)', 'Old Elec')}
+                    </label>
+                    <input
+                      type="number"
+                      step="any"
+                      value={editTenantForm.elecOld}
+                      onChange={e => setEditTenantForm({ ...editTenantForm, elecOld: e.target.value })}
+                      className="w-full bg-amber-50/70 border border-amber-300 rounded-xl p-2.5 font-mono font-black focus:border-amber-600 focus:bg-white outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-bold text-cyan-900 mb-1">
+                      💧 {tr('ទឹកចាស់ (m³)', 'Old Water')}
+                    </label>
+                    <input
+                      type="number"
+                      step="any"
+                      value={editTenantForm.waterOld}
+                      onChange={e => setEditTenantForm({ ...editTenantForm, waterOld: e.target.value })}
+                      className="w-full bg-cyan-50/70 border border-cyan-300 rounded-xl p-2.5 font-mono font-black focus:border-cyan-600 focus:bg-white outline-none"
                     />
                   </div>
                 </div>
@@ -3028,12 +3324,42 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
                   />
                 </div>
 
-                <button
-                  type="submit"
-                  className="w-full py-3 bg-emerald-700 hover:bg-emerald-600 text-white font-black rounded-xl shadow cursor-pointer"
-                >
-                  {tr('រក្សាទុកការកែប្រែ (រក្សាចំណូលបូកបន្ត)', 'Save Changes (Keep Cumulative Revenue)')}
-                </button>
+                <div className="space-y-2 pt-1">
+                  <button
+                    type="submit"
+                    className="w-full py-3 bg-emerald-700 hover:bg-emerald-600 text-white font-black rounded-xl shadow cursor-pointer flex items-center justify-center gap-2"
+                  >
+                    <RefreshCw className="w-4 h-4" />
+                    <span>
+                      {tr(
+                        'ធ្វើបច្ចុប្បន្នភាពប្រព័ន្ធឥឡូវនេះ (រក្សាចំណូលបូកបន្ត)',
+                        'Update System Now (Keep Cumulative Revenue)'
+                      )}
+                    </span>
+                  </button>
+
+                  {(() => {
+                    const currentEditingTenant = savedTenants.find(
+                      t => normalizeRoom(t.roomNo) === normalizeRoom(editingRoomNo)
+                    );
+                    if (!currentEditingTenant) return null;
+                    return (
+                      <button
+                        type="button"
+                        onClick={() => handleVacateTenantKeepRevenue(currentEditingTenant)}
+                        className="w-full py-2.5 bg-red-600 hover:bg-red-500 text-white font-extrabold rounded-xl shadow cursor-pointer flex items-center justify-center gap-1.5"
+                      >
+                        <UserMinus className="w-4 h-4" />
+                        <span>
+                          {tr(
+                            `លុបភ្ញៀវចាស់បន្ទប់ ${formatRoomCode(editingRoomNo)} (រក្សាទុកចំណូលម្ចាស់ផ្ទះបូកបន្ត)`,
+                            `Delete Old Tenant ${formatRoomCode(editingRoomNo)} (Keep Landlord Cumulative Revenue)`
+                          )}
+                        </span>
+                      </button>
+                    );
+                  })()}
+                </div>
               </div>
             </form>
           </div>
@@ -3090,7 +3416,12 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
                     const occ = savedTenants.find(t => normalizeRoom(t.roomNo) === cleanR);
                     return (
                       <option key={`meter-room-${cleanR}`} value={cleanR}>
-                        {formatRoomCode(cleanR)} — {occ ? occ.tenantName : tr('បន្ទប់ទំនេរ', 'Vacant Room')}
+                        {formatRoomCode(cleanR)} —{' '}
+                        {occ
+                          ? resolvedRole === 'owner'
+                            ? occ.tenantName
+                            : tr('មានភ្ញៀវជួល (Occupied)', 'Occupied')
+                          : tr('បន្ទប់ទំនេរ', 'Vacant Room')}
                       </option>
                     );
                   })}
@@ -3099,10 +3430,16 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
 
               <div>
                 <label className="block text-xs font-extrabold text-emerald-950 mb-1">
-                  {tr('២. ភ្ញៀវកំពុងស្នាក់នៅ', '2. Active Tenant')}
+                  {tr('២. ស្ថានភាពបន្ទប់ជួល', '2. Room Status')}
                 </label>
-                <div className="bg-white border border-stone-300 rounded-xl p-2.5 text-sm font-moul text-blue-950 flex items-center justify-between">
-                  <span>{selectedMeterTenant?.tenantName || tr('បន្ទប់ទំនេរ', 'Vacant Room')}</span>
+                <div className="bg-white border border-stone-300 rounded-xl p-2.5 text-sm font-extrabold text-blue-950 flex items-center justify-between">
+                  <span>
+                    {selectedMeterTenant
+                      ? resolvedRole === 'owner'
+                        ? `${formatRoomCode(meterRoomNo)} • ${selectedMeterTenant.tenantName}`
+                        : `${formatRoomCode(meterRoomNo)} — ${tr('មានភ្ញៀវជួល', 'Occupied')}`
+                      : tr('បន្ទប់ទំនេរ', 'Vacant Room')}
+                  </span>
                 </div>
               </div>
 
@@ -3177,12 +3514,14 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
                       {meterElecNew ? `${liveElecConsumption} kWh` : '0 kWh'}
                     </span>
                   </div>
-                  <div className="flex justify-between">
-                    <span className="font-sans text-stone-600">{tr('ប្រាក់ភ្លើង៖', 'Electricity Cost:')}</span>
-                    <span className="font-black text-emerald-800">
-                      ៛{liveElecCostRiel.toLocaleString()} (~ ${liveElecCostUsd.toFixed(2)})
-                    </span>
-                  </div>
+                  {resolvedRole === 'owner' && (
+                    <div className="flex justify-between">
+                      <span className="font-sans text-stone-600">{tr('ប្រាក់ភ្លើង៖', 'Electricity Cost:')}</span>
+                      <span className="font-black text-emerald-800">
+                        ៛{liveElecCostRiel.toLocaleString()} (~ ${liveElecCostUsd.toFixed(2)})
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -3241,12 +3580,14 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
                       {meterWaterNew ? `${liveWaterConsumption} m³` : '0 m³'}
                     </span>
                   </div>
-                  <div className="flex justify-between">
-                    <span className="font-sans text-stone-600">{tr('ប្រាក់ទឹក៖', 'Water Cost:')}</span>
-                    <span className="font-black text-emerald-800">
-                      ៛{liveWaterCostRiel.toLocaleString()} (~ ${liveWaterCostUsd.toFixed(2)})
-                    </span>
-                  </div>
+                  {resolvedRole === 'owner' && (
+                    <div className="flex justify-between">
+                      <span className="font-sans text-stone-600">{tr('ប្រាក់ទឹក៖', 'Water Cost:')}</span>
+                      <span className="font-black text-emerald-800">
+                        ៛{liveWaterCostRiel.toLocaleString()} (~ ${liveWaterCostUsd.toFixed(2)})
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -3276,24 +3617,33 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
             )}
 
             <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 pt-2 border-t border-stone-200">
-              <div className="text-xs text-stone-600">
-                {tr('ថ្លៃបន្ទប់៖', 'Room Rent:')}{' '}
-                <strong className="font-mono">${selectedMeterTenant?.roomPrice || 80}</strong> +{' '}
-                {tr('ទឹកភ្លើង៖', 'Utilities:')}{' '}
-                <strong className="font-mono text-emerald-700">
-                  ${(liveElecCostUsd + liveWaterCostUsd).toFixed(2)}
-                </strong>{' '}
-                = {tr('សរុបខែនេះ៖', 'Month Total:')}{' '}
-                <strong className="font-mono text-base font-black text-emerald-900">
-                  $
-                  {(
-                    (selectedMeterTenant?.roomPrice || 80) +
-                    (selectedMeterTenant?.wifiPrice || 0) +
-                    liveElecCostUsd +
-                    liveWaterCostUsd
-                  ).toFixed(2)}
-                </strong>
-              </div>
+              {resolvedRole === 'owner' ? (
+                <div className="text-xs text-stone-600">
+                  {tr('ថ្លៃបន្ទប់៖', 'Room Rent:')}{' '}
+                  <strong className="font-mono">${selectedMeterTenant?.roomPrice || 80}</strong> +{' '}
+                  {tr('ទឹកភ្លើង៖', 'Utilities:')}{' '}
+                  <strong className="font-mono text-emerald-700">
+                    ${(liveElecCostUsd + liveWaterCostUsd).toFixed(2)}
+                  </strong>{' '}
+                  = {tr('សរុបខែនេះ៖', 'Month Total:')}{' '}
+                  <strong className="font-mono text-base font-black text-emerald-900">
+                    $
+                    {(
+                      (selectedMeterTenant?.roomPrice || 80) +
+                      (selectedMeterTenant?.wifiPrice || 0) +
+                      liveElecCostUsd +
+                      liveWaterCostUsd
+                    ).toFixed(2)}
+                  </strong>
+                </div>
+              ) : (
+                <div className="text-xs font-bold text-emerald-900">
+                  {tr(
+                    `បន្ទប់ជ្រើសរើស៖ ${formatRoomCode(meterRoomNo)}`,
+                    `Selected Room: ${formatRoomCode(meterRoomNo)}`
+                  )}
+                </div>
+              )}
 
               <button
                 type="submit"
@@ -3308,7 +3658,7 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
           {/* Right Quick Room Selector */}
           <div className="lg:col-span-4 bg-white rounded-2xl border border-stone-200 p-4 shadow-sm space-y-3">
             <h4 className="text-xs font-extrabold text-stone-800 uppercase border-b border-stone-200 pb-2">
-              {tr(`ជ្រើសរើសបន្ទប់រហ័ស (${scopedTenants.length} បន្ទប់)`, `Quick Room Select (${scopedTenants.length} Rooms)`)}
+              {tr(`ជ្រើសរើសលេខបន្ទប់ភ្ញៀវជួល (${scopedTenants.length} បន្ទប់)`, `Select Tenant Room Number (${scopedTenants.length} Rooms)`)}
             </h4>
             <div className="space-y-1.5 max-h-[460px] overflow-y-auto pr-1">
               {scopedTenants.map(t => {
@@ -3332,7 +3682,11 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
                       <span className="font-mono font-black text-xs px-2 py-0.5 rounded bg-black/20">
                         {formatRoomCode(cleanR)}
                       </span>
-                      <span className="font-moul text-xs truncate">{t.tenantName}</span>
+                      <span className="font-sans font-bold text-xs truncate">
+                        {resolvedRole === 'owner'
+                          ? t.tenantName
+                          : tr(`បន្ទប់ភ្ញៀវជួល ${formatRoomCode(cleanR)}`, `Tenant Room ${formatRoomCode(cleanR)}`)}
+                      </span>
                     </div>
                     <span
                       className={`text-[10px] font-black px-2 py-0.5 rounded shrink-0 ${
@@ -3350,9 +3704,9 @@ export const ManagerSharingSystem: React.FC<ManagerSharingProps> = ({
       )}
 
       {/* =====================================================================
-          MODULE 6: ប្រវត្តិកត់ត្រា / Entry History & Audit Control
+          MODULE 6: ប្រវត្តិកត់ត្រា / Entry History & Audit Control (Owner Only)
          ===================================================================== */}
-      {sopheakTab === 'entryHistory' && (
+      {sopheakTab === 'entryHistory' && resolvedRole === 'owner' && (
         <div className="space-y-6">
           <div className="bg-white rounded-2xl border border-stone-200 p-5 shadow-sm space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-stone-200 pb-3">
